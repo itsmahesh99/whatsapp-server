@@ -422,6 +422,8 @@ const processMessageTemplate = (template, contact) => {
     .replace(/\{\{mobile\}\}/g, contact.mobile || '')
     .replace(/\{\{interestedArea\}\}/g, contact.interestedArea || '')
     .replace(/\{\{contactType\}\}/g, contact.contactType || '');
+  
+  return processed; // Return the processed template
 };
 
 // API Routes

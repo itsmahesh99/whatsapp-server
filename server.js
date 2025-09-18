@@ -43,7 +43,18 @@ const initializeWhatsApp = () => {
         '--no-first-run',
         '--no-zygote',
         '--single-process',
-        '--disable-gpu'
+        '--disable-gpu',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-features=TranslateUI',
+        '--disable-ipc-flooding-protection',
+        '--disable-extensions',
+        '--disable-default-apps',
+        '--disable-web-security',
+        '--disable-features=VizDisplayCompositor',
+        '--remote-debugging-port=9222',
+        '--remote-debugging-address=0.0.0.0'
       ]
     }
   });

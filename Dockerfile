@@ -30,8 +30,22 @@ COPY . .
 # Create directory for WhatsApp session data
 RUN mkdir -p .wwebjs_auth
 
+# Add user for running Chrome (security best practice)
+RUN addgroup -g 1001 -S nodejs
+RUN adduser -S nextjs -u 1001
+
+# Change ownership of the working directory
+RUN chown -R nextjs:nodejs /app
+USER nextjs
+
 # Expose port
 EXPOSE 3001
+
+# Set environment to production
+ENV NODE_ENV=production
+
+# Start the application with Chrome args for Docker
+CMD ["node", "server.js"]
 
 # Set environment to production
 ENV NODE_ENV=production

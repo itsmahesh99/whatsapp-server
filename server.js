@@ -22,48 +22,16 @@ const corsOrigins = process.env.CORS_ORIGINS
   ];
 
 app.use(cors({
-  origin: function (origin, callback) {
-    console.log('🌐 CORS request from origin:', origin);
-    
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) {
-      console.log('✅ Allowing request with no origin');
-      return callback(null, true);
-    }
-    
-    if (corsOrigins.indexOf(origin) !== -1) {
-      console.log('✅ Origin allowed:', origin);
-      callback(null, true);
-    } else {
-      console.log('❌ Origin blocked:', origin);
-      console.log('📋 Allowed origins:', corsOrigins);
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
+  origin: true, // Allow all origins for now
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
-  optionsSuccessStatus: 200 // For legacy browser support
+  optionsSuccessStatus: 200
 }));
 
-console.log('🔧 CORS configured with origins:', corsOrigins);
+console.log('🔧 CORS configured to allow all origins (debug mode)');
+console.log('📋 Intended origins:', corsOrigins);
 app.use(express.json());
-
-// Additional CORS handling for preflight requests
-app.use('*', (req, res, next) => {
-  console.log(`📡 ${req.method} request to ${req.originalUrl} from origin: ${req.get('Origin') || 'no-origin'}`);
-  
-  if (req.method === 'OPTIONS') {
-    console.log('🔄 Handling OPTIONS preflight request');
-    res.header('Access-Control-Allow-Origin', req.get('Origin') || '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin');
-    res.header('Access-Control-Allow-Credentials', 'true');
-    return res.status(200).end();
-  }
-  
-  next();
-});
 
 // WhatsApp client
 let client = null;

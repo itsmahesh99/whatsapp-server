@@ -1,0 +1,20 @@
+version: '3.8'
+services:
+  whatsapp-server:
+    build: .
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+    volumes:
+      - whatsapp_data:/app/.wwebjs_auth
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  whatsapp_data:

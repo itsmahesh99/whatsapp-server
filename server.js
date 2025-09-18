@@ -22,7 +22,43 @@ const corsOrigins = process.env.CORS_ORIGINS
   ];
 
 app.use(cors({
-  origin: true, // Allow all origins for now
+  origin: function (origin, callback) {
+    console.log('🌐 CORS request from origin:', origin);
+    
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) {
+      console.log('✅ Allowing request with no origin');
+      return callback(null, true);
+    }
+    
+    // Check if origin exactly matches one of our allowed origins
+    if (corsOrigins.indexOf(origin) !== -1) {
+      console.log('✅ Origin allowed (exact match):', origin);
+      return callback(null, true);
+    }
+    
+    // Check for seetech.energenie.io with any path
+    if (origin.startsWith('https://seetech.energenie.io')) {
+      console.log('✅ Origin allowed (seetech wildcard match):', origin);
+      return callback(null, true);
+    }
+    
+    // Check for formserver.energenie.io with any path
+    if (origin.startsWith('https://formserver.energenie.io')) {
+      console.log('✅ Origin allowed (formserver wildcard match):', origin);
+      return callback(null, true);
+    }
+    
+    // Check for localhost variations
+    if (origin.includes('localhost')) {
+      console.log('✅ Origin allowed (localhost):', origin);
+      return callback(null, true);
+    }
+    
+    console.log('❌ Origin blocked:', origin);
+    console.log('📋 Allowed origins:', corsOrigins);
+    callback(new Error('Not allowed by CORS'));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
@@ -159,6 +195,9 @@ const initializeWhatsApp = () => {
     qrCodeData = null;
     qrCodeTimestamp = null; // Clear QR data when authenticated
     console.log('🗑️ QR Code data cleared - authentication successful');
+    
+    // Start session health monitoring
+    startSessionMonitor();
   });
 
   client.on('authenticated', () => {
@@ -218,6 +257,48 @@ const initializeWhatsApp = () => {
   }
 };
 
+// Session monitoring to detect and handle session issues proactively
+let sessionMonitorInterval;
+const startSessionMonitor = () => {
+  // Clear any existing monitor
+  if (sessionMonitorInterval) {
+    clearInterval(sessionMonitorInterval);
+  }
+  
+  console.log('🔍 Starting session health monitor...');
+  
+  sessionMonitorInterval = setInterval(async () => {
+    try {
+      if (!client || !isClientReady) {
+        console.log('⚠️ Monitor: Client not ready');
+        return;
+      }
+      
+      const healthy = await isSessionHealthy();
+      if (!healthy) {
+        console.log('❌ Monitor: Session unhealthy detected');
+        isClientReady = false;
+        
+        // Attempt to reinitialize
+        console.log('🔄 Monitor: Attempting session recovery...');
+        try {
+          await client.destroy();
+        } catch (e) {
+          console.log('⚠️ Monitor: Error destroying client:', e.message);
+        }
+        
+        setTimeout(() => {
+          initializeWhatsApp();
+        }, 3000);
+      } else {
+        console.log('✅ Monitor: Session healthy');
+      }
+    } catch (error) {
+      console.log('❌ Monitor error:', error.message);
+    }
+  }, 30000); // Check every 30 seconds
+};
+
 // Utility function to check if QR code is still valid
 const isQRCodeValid = () => {
   if (!qrCodeData || !qrCodeTimestamp) {
@@ -235,6 +316,52 @@ const isQRCodeValid = () => {
   }
   
   return isValid;
+};
+
+// Function to check if WhatsApp session is healthy
+const isSessionHealthy = async () => {
+  try {
+    if (!client) {
+      console.log('❌ Client not initialized');
+      return false;
+    }
+
+    const state = await client.getState();
+    console.log('🔍 Session state:', state);
+    
+    if (state !== 'CONNECTED') {
+      console.log('❌ Session not connected, state:', state);
+      return false;
+    }
+
+    // Try to get client info as a health check
+    const clientInfo = await client.info;
+    console.log('✅ Session healthy, client info available');
+    return true;
+  } catch (error) {
+    console.log('❌ Session health check failed:', error.message);
+    return false;
+  }
+};
+
+// Function to wait for session to be ready with retry
+const waitForSession = async (maxRetries = 3, delay = 2000) => {
+  for (let i = 0; i < maxRetries; i++) {
+    console.log(`🔄 Checking session health (attempt ${i + 1}/${maxRetries})`);
+    
+    if (await isSessionHealthy()) {
+      console.log('✅ Session is ready');
+      return true;
+    }
+    
+    if (i < maxRetries - 1) {
+      console.log(`⏳ Waiting ${delay}ms before retry...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  
+  console.log('❌ Session not ready after all retries');
+  return false;
 };
 
 // Utility function to format phone number
@@ -392,6 +519,14 @@ app.post('/api/whatsapp/send-single', async (req, res) => {
       });
     }
 
+    // Check session health before sending
+    if (!(await waitForSession())) {
+      return res.status(500).json({
+        success: false,
+        message: 'WhatsApp session is not healthy. Please try again.'
+      });
+    }
+
     // Send message
     await client.sendMessage(chatId, processedMessage);
 
@@ -474,18 +609,43 @@ app.post('/api/whatsapp/send-bulk', async (req, res) => {
 
         // Check if number exists on WhatsApp with retry logic
         let numberId;
-        try {
-          numberId = await client.getNumberId(chatId);
-        } catch (error) {
-          console.error(`❌ Error checking number ${chatId}:`, error.message);
-          results.failed++;
-          results.details.push({
-            contact: contact.name || 'Unknown',
-            mobile: contact.mobile,
-            status: 'failed',
-            reason: 'Error checking WhatsApp registration: ' + error.message
-          });
-          continue;
+        let maxRetries = 3;
+        
+        for (let retry = 0; retry < maxRetries; retry++) {
+          try {
+            // Wait for session to be ready before attempting operations
+            if (!(await waitForSession())) {
+              throw new Error('Session not ready after health check');
+            }
+            
+            console.log(`🔍 Checking if ${chatId} is registered on WhatsApp (attempt ${retry + 1}/${maxRetries})...`);
+            numberId = await client.getNumberId(chatId);
+            break; // Success, exit retry loop
+            
+          } catch (error) {
+            console.error(`❌ Error checking number ${chatId} (attempt ${retry + 1}):`, error.message);
+            
+            // If session is closed or page closed, try to reinitialize on last retry
+            if ((error.message.includes('Session closed') || error.message.includes('page has been closed')) && retry === maxRetries - 1) {
+              console.log('🔄 Final attempt: reinitializing WhatsApp client...');
+              try {
+                initializeWhatsApp();
+                await new Promise(resolve => setTimeout(resolve, 5000)); // Wait longer for init
+                
+                if (await waitForSession()) {
+                  numberId = await client.getNumberId(chatId);
+                  break;
+                }
+              } catch (retryError) {
+                console.error(`❌ Final retry failed:`, retryError.message);
+              }
+            }
+            
+            // If not the last retry, wait before trying again
+            if (retry < maxRetries - 1) {
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+          }
         }
         
         if (!numberId) {
@@ -500,29 +660,49 @@ app.post('/api/whatsapp/send-bulk', async (req, res) => {
           continue;
         }
 
-        // Send message with error handling
-        try {
-          console.log(`📤 Sending message to ${contact.name || 'Unknown'} at ${chatId}`);
-          await client.sendMessage(chatId, processedMessage);
-          
-          results.sent++;
-          results.details.push({
-            contact: contact.name || 'Unknown',
-            mobile: contact.mobile,
-            status: 'sent',
-            reason: 'Success'
-          });
+        // Send message with error handling and session validation
+        let sendSuccess = false;
+        for (let sendRetry = 0; sendRetry < 2; sendRetry++) {
+          try {
+            // Ensure session is healthy before sending
+            if (!(await waitForSession())) {
+              throw new Error('Session not ready for sending message');
+            }
+            
+            console.log(`📤 Sending message to ${contact.name || 'Unknown'} at ${chatId} (attempt ${sendRetry + 1}/2)`);
+            await client.sendMessage(chatId, processedMessage);
+            
+            results.sent++;
+            results.details.push({
+              contact: contact.name || 'Unknown',
+              mobile: contact.mobile,
+              status: 'sent',
+              reason: 'Success'
+            });
 
-          console.log(`✅ Message sent to ${contact.name || 'Unknown'} (${results.sent}/${contacts.length})`);
-        } catch (sendError) {
-          console.error(`❌ Failed to send message to ${contact.name || 'Unknown'}:`, sendError.message);
-          results.failed++;
-          results.details.push({
-            contact: contact.name || 'Unknown',
-            mobile: contact.mobile,
-            status: 'failed',
-            reason: 'Send error: ' + sendError.message
-          });
+            console.log(`✅ Message sent to ${contact.name || 'Unknown'} (${results.sent}/${contacts.length})`);
+            sendSuccess = true;
+            break;
+            
+          } catch (sendError) {
+            console.error(`❌ Failed to send message to ${contact.name || 'Unknown'} (attempt ${sendRetry + 1}):`, sendError.message);
+            
+            // If session is closed and it's the first retry, wait and try again
+            if ((sendError.message.includes('Session closed') || sendError.message.includes('page has been closed')) && sendRetry === 0) {
+              console.log('🔄 Session issue detected, waiting before retry...');
+              await new Promise(resolve => setTimeout(resolve, 3000));
+            } else {
+              // Final failure
+              results.failed++;
+              results.details.push({
+                contact: contact.name || 'Unknown',
+                mobile: contact.mobile,
+                status: 'failed',
+                reason: 'Send error: ' + sendError.message
+              });
+              break;
+            }
+          }
         }
 
         // Add delay between messages (2-3 seconds to avoid rate limiting)

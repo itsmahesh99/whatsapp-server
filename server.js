@@ -15,7 +15,10 @@ const corsOrigins = process.env.CORS_ORIGINS
     'https://localhost:3000',
     'http://localhost:3001',
     'https://localhost:3001',
-    'https://formserver.energenie.io'
+    'https://formserver.energenie.io',
+    'https://seetech.energenie.io',
+    'http://seetech.energenie.io',
+    'https://seetech.energenie.io/whatsapp'
   ];
 
 app.use(cors({
@@ -233,16 +236,44 @@ const isQRCodeValid = () => {
 // Utility function to format phone number
 const formatPhoneNumber = (mobile) => {
   console.log('📞 Formatting phone number:', mobile);
+  
+  // Handle empty or invalid input
+  if (!mobile || typeof mobile !== 'string') {
+    console.error('❌ Invalid mobile number provided:', mobile);
+    return null;
+  }
+  
   // Remove all non-digit characters
   let cleaned = mobile.replace(/\D/g, '');
+  
+  // Check if we have any digits left
+  if (!cleaned || cleaned.length === 0) {
+    console.error('❌ No digits found in mobile number:', mobile);
+    return null;
+  }
+  
+  console.log('📞 Cleaned number:', cleaned);
   
   // Add country code if not present (assuming India +91)
   if (cleaned.length === 10) {
     cleaned = '91' + cleaned;
     console.log('📞 Added country code 91 for 10-digit number');
-  } else if (cleaned.startsWith('0')) {
+  } else if (cleaned.length === 11 && cleaned.startsWith('0')) {
     cleaned = '91' + cleaned.substring(1);
     console.log('📞 Replaced leading 0 with country code 91');
+  } else if (cleaned.length === 12 && cleaned.startsWith('91')) {
+    console.log('📞 Country code 91 already present');
+  } else if (cleaned.length === 13 && cleaned.startsWith('091')) {
+    cleaned = '91' + cleaned.substring(3);
+    console.log('📞 Fixed 091 prefix to 91');
+  } else {
+    console.warn('⚠️ Unusual number length:', cleaned.length, 'for number:', cleaned);
+  }
+  
+  // Validate final length
+  if (cleaned.length !== 12) {
+    console.error('❌ Invalid final number length:', cleaned.length, 'for number:', cleaned);
+    return null;
   }
   
   const formatted = cleaned + '@c.us';
@@ -337,6 +368,15 @@ app.post('/api/whatsapp/send-single', async (req, res) => {
     }
 
     const chatId = formatPhoneNumber(contact.mobile);
+    
+    // Check if phone number formatting was successful
+    if (!chatId) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid phone number format: ${contact.mobile}`
+      });
+    }
+    
     const processedMessage = processMessageTemplate(message, contact);
 
     // Check if number exists on WhatsApp
@@ -354,7 +394,7 @@ app.post('/api/whatsapp/send-single', async (req, res) => {
     res.json({
       success: true,
       message: 'Message sent successfully',
-      contact: contact.name,
+      contact: contact.name || 'Unknown',
       mobile: contact.mobile,
       timestamp: new Date().toISOString()
     });
@@ -409,15 +449,46 @@ app.post('/api/whatsapp/send-bulk', async (req, res) => {
       const contact = contacts[i];
       
       try {
+        console.log(`Processing contact ${i + 1}/${contacts.length}: ${contact.name || 'Unknown'} - ${contact.mobile}`);
+        
         const chatId = formatPhoneNumber(contact.mobile);
-        const processedMessage = processMessageTemplate(template, contact);
-
-        // Check if number exists on WhatsApp
-        const numberId = await client.getNumberId(chatId);
-        if (!numberId) {
+        
+        // Skip if phone number formatting failed
+        if (!chatId) {
+          console.error(`❌ Invalid phone number for ${contact.name}: ${contact.mobile}`);
           results.failed++;
           results.details.push({
-            contact: contact.name,
+            contact: contact.name || 'Unknown',
+            mobile: contact.mobile,
+            status: 'failed',
+            reason: 'Invalid phone number format'
+          });
+          continue;
+        }
+        
+        const processedMessage = processMessageTemplate(template, contact);
+
+        // Check if number exists on WhatsApp with retry logic
+        let numberId;
+        try {
+          numberId = await client.getNumberId(chatId);
+        } catch (error) {
+          console.error(`❌ Error checking number ${chatId}:`, error.message);
+          results.failed++;
+          results.details.push({
+            contact: contact.name || 'Unknown',
+            mobile: contact.mobile,
+            status: 'failed',
+            reason: 'Error checking WhatsApp registration: ' + error.message
+          });
+          continue;
+        }
+        
+        if (!numberId) {
+          console.warn(`⚠️ Number not on WhatsApp: ${chatId}`);
+          results.failed++;
+          results.details.push({
+            contact: contact.name || 'Unknown',
             mobile: contact.mobile,
             status: 'failed',
             reason: 'Number not registered on WhatsApp'
@@ -425,41 +496,54 @@ app.post('/api/whatsapp/send-bulk', async (req, res) => {
           continue;
         }
 
-        // Send message
-        await client.sendMessage(chatId, processedMessage);
-        
-        results.sent++;
-        results.details.push({
-          contact: contact.name,
-          mobile: contact.mobile,
-          status: 'sent',
-          reason: 'Success'
-        });
+        // Send message with error handling
+        try {
+          console.log(`📤 Sending message to ${contact.name || 'Unknown'} at ${chatId}`);
+          await client.sendMessage(chatId, processedMessage);
+          
+          results.sent++;
+          results.details.push({
+            contact: contact.name || 'Unknown',
+            mobile: contact.mobile,
+            status: 'sent',
+            reason: 'Success'
+          });
 
-        console.log(`Message sent to ${contact.name} (${i + 1}/${contacts.length})`);
+          console.log(`✅ Message sent to ${contact.name || 'Unknown'} (${results.sent}/${contacts.length})`);
+        } catch (sendError) {
+          console.error(`❌ Failed to send message to ${contact.name || 'Unknown'}:`, sendError.message);
+          results.failed++;
+          results.details.push({
+            contact: contact.name || 'Unknown',
+            mobile: contact.mobile,
+            status: 'failed',
+            reason: 'Send error: ' + sendError.message
+          });
+        }
 
         // Add delay between messages (2-3 seconds to avoid rate limiting)
         if (i < contacts.length - 1) {
+          console.log(`⏳ Waiting 2.5 seconds before next message...`);
           await new Promise(resolve => setTimeout(resolve, 2500));
         }
 
       } catch (error) {
-        console.error(`Failed to send message to ${contact.name}:`, error.message);
+        console.error(`❌ Unexpected error processing ${contact.name || 'Unknown'}:`, error.message);
         results.failed++;
         results.details.push({
-          contact: contact.name,
+          contact: contact.name || 'Unknown',
           mobile: contact.mobile,
           status: 'failed',
-          reason: error.message
+          reason: 'Processing error: ' + error.message
         });
       }
     }
 
-    console.log(`Bulk messaging completed. Sent: ${results.sent}, Failed: ${results.failed}`);
+    console.log(`🎉 Bulk messaging completed. Sent: ${results.sent}, Failed: ${results.failed}`);
 
     res.json({
       success: true,
-      message: `Bulk messaging completed. Sent: ${results.sent}, Failed: ${results.failed}`,
+      message: `Successfully sent ${results.sent} messages! Failed: ${results.failed}`,
       results,
       timestamp: new Date().toISOString()
     });

@@ -30,6 +30,8 @@ app.use(express.json());
 let client = null;
 let isClientReady = false;
 let qrCodeData = null;
+let qrCodeTimestamp = null;
+let qrCodeExpiryTime = 20000; // 20 seconds (typical QR code lifespan)
 
 // Initialize WhatsApp client
 const initializeWhatsApp = () => {
@@ -131,11 +133,12 @@ const initializeWhatsApp = () => {
 
   // Event handlers
   client.on('qr', async (qr) => {
-    console.log('QR Code generated');
     console.log('📱 QR Code generated, converting to data URL...');
     try {
       qrCodeData = await qrcode.toDataURL(qr);
+      qrCodeTimestamp = Date.now(); // Track when QR code was generated
       console.log('✅ QR Code ready for scanning');
+      console.log('⏰ QR Code timestamp:', new Date(qrCodeTimestamp).toISOString());
       console.log('📏 QR Code data length:', qrCodeData.length);
     } catch (error) {
       console.error('❌ Error generating QR code:', error);
@@ -147,6 +150,8 @@ const initializeWhatsApp = () => {
     console.log('🔗 Client connection established successfully');
     isClientReady = true;
     qrCodeData = null;
+    qrCodeTimestamp = null; // Clear QR data when authenticated
+    console.log('🗑️ QR Code data cleared - authentication successful');
   });
 
   client.on('authenticated', () => {
@@ -165,6 +170,7 @@ const initializeWhatsApp = () => {
     console.log('📊 Connection status reset');
     isClientReady = false;
     qrCodeData = null;
+    qrCodeTimestamp = null; // Clear QR data on disconnect
     
     // Retry initialization after disconnect
     console.log('⏰ Scheduling reconnection in 5 seconds...');
@@ -203,6 +209,25 @@ const initializeWhatsApp = () => {
       initializeWhatsApp();
     }, 10000);
   }
+};
+
+// Utility function to check if QR code is still valid
+const isQRCodeValid = () => {
+  if (!qrCodeData || !qrCodeTimestamp) {
+    return false;
+  }
+  
+  const now = Date.now();
+  const elapsed = now - qrCodeTimestamp;
+  const isValid = elapsed < qrCodeExpiryTime;
+  
+  if (!isValid) {
+    console.log('⏰ QR Code has expired, clearing data');
+    qrCodeData = null;
+    qrCodeTimestamp = null;
+  }
+  
+  return isValid;
 };
 
 // Utility function to format phone number
@@ -244,10 +269,18 @@ app.get('/api/whatsapp/status', (req, res) => {
   console.log('📊 Status check requested from:', req.ip);
   
   let status = 'disconnected';
+  let qrInfo = null;
   
-  if (qrCodeData) {
+  // Check QR code validity first
+  if (isQRCodeValid()) {
     status = 'qr-ready';
-    console.log('📱 Status: QR code is ready for scanning');
+    const remainingTime = Math.max(0, qrCodeExpiryTime - (Date.now() - qrCodeTimestamp));
+    qrInfo = {
+      available: true,
+      expiresIn: Math.round(remainingTime / 1000),
+      generatedAt: new Date(qrCodeTimestamp).toISOString()
+    };
+    console.log('📱 Status: QR code is ready for scanning, expires in:', Math.round(remainingTime / 1000), 'seconds');
   } else if (isClientReady) {
     status = 'ready';
     console.log('✅ Status: WhatsApp client is ready');
@@ -261,7 +294,7 @@ app.get('/api/whatsapp/status', (req, res) => {
   console.log('📤 Sending status response:', status);
   res.json({
     status,
-    qrCode: qrCodeData,
+    qrCode: qrInfo, // Include QR info instead of raw data
     timestamp: new Date().toISOString()
   });
 });
@@ -443,29 +476,42 @@ app.post('/api/whatsapp/send-bulk', async (req, res) => {
 
 // Get QR code for scanning
 app.get('/api/whatsapp/qr', (req, res) => {
-  if (qrCodeData) {
+  console.log('📱 QR Code requested from:', req.ip);
+  
+  // Check if QR code is still valid
+  if (isQRCodeValid()) {
+    const remainingTime = Math.max(0, qrCodeExpiryTime - (Date.now() - qrCodeTimestamp));
+    console.log('✅ Returning valid QR code, expires in:', Math.round(remainingTime / 1000), 'seconds');
+    
     res.json({
       success: true,
       qrCode: qrCodeData,
-      message: 'Scan this QR code with WhatsApp on your phone'
+      message: 'Scan this QR code with WhatsApp on your phone',
+      expiresIn: Math.round(remainingTime / 1000), // seconds until expiry
+      generatedAt: new Date(qrCodeTimestamp).toISOString()
     });
   } else {
+    console.log('❌ No valid QR code available');
     res.json({
       success: false,
-      message: 'QR code not available. Initialize WhatsApp first.'
+      message: 'QR code not available or expired. Initialize WhatsApp or wait for new QR code.',
+      timestamp: new Date().toISOString()
     });
   }
 });
 
 // Disconnect WhatsApp
 app.post('/api/whatsapp/disconnect', async (req, res) => {
+  console.log('🔌 Disconnect requested from:', req.ip);
   try {
     if (client) {
+      console.log('🧹 Destroying WhatsApp client...');
       await client.destroy();
       client = null;
     }
     isClientReady = false;
     qrCodeData = null;
+    qrCodeTimestamp = null; // Clear QR data on manual disconnect
 
     res.json({
       success: true,

@@ -44,11 +44,5 @@ EXPOSE 3001
 # Set environment to production
 ENV NODE_ENV=production
 
-# Start the application with Chrome args for Docker
-CMD ["node", "server.js"]
-
-# Set environment to production
-ENV NODE_ENV=production
-
 # Start the application
 CMD ["node", "server.js"]

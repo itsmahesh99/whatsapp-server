@@ -33,10 +33,14 @@ let qrCodeData = null;
 
 // Initialize WhatsApp client
 const initializeWhatsApp = () => {
+  console.log('🔄 Starting WhatsApp client initialization...');
+  
   if (client) {
+    console.log('🧹 Destroying existing client...');
     client.destroy();
   }
 
+  console.log('⚙️ Creating new WhatsApp client with Puppeteer config...');
   client = new Client({
     authStrategy: new LocalAuth({
       clientId: "energenie-whatsapp"
@@ -122,58 +126,80 @@ const initializeWhatsApp = () => {
     }
   });
 
+  console.log('✅ WhatsApp client created successfully');
+  console.log('📡 Setting up event handlers...');
+
   // Event handlers
   client.on('qr', async (qr) => {
     console.log('QR Code generated');
+    console.log('📱 QR Code generated, converting to data URL...');
     try {
       qrCodeData = await qrcode.toDataURL(qr);
-      console.log('QR Code ready for scanning');
+      console.log('✅ QR Code ready for scanning');
+      console.log('📏 QR Code data length:', qrCodeData.length);
     } catch (error) {
-      console.error('Error generating QR code:', error);
+      console.error('❌ Error generating QR code:', error);
     }
   });
 
   client.on('ready', () => {
-    console.log('WhatsApp client is ready!');
+    console.log('🎉 WhatsApp client is ready!');
+    console.log('🔗 Client connection established successfully');
     isClientReady = true;
     qrCodeData = null;
   });
 
   client.on('authenticated', () => {
-    console.log('WhatsApp client authenticated');
+    console.log('🔐 WhatsApp client authenticated successfully');
+    console.log('👤 Authentication process completed');
   });
 
   client.on('auth_failure', (msg) => {
-    console.error('Authentication failed:', msg);
+    console.error('❌ Authentication failed:', msg);
+    console.error('🔄 Will attempt to restart authentication process');
     isClientReady = false;
   });
 
   client.on('disconnected', (reason) => {
-    console.log('WhatsApp client disconnected:', reason);
+    console.log('🔌 WhatsApp client disconnected. Reason:', reason);
+    console.log('📊 Connection status reset');
     isClientReady = false;
     qrCodeData = null;
     
     // Retry initialization after disconnect
+    console.log('⏰ Scheduling reconnection in 5 seconds...');
     setTimeout(() => {
-      console.log('Attempting to reconnect WhatsApp...');
+      console.log('🔄 Attempting to reconnect WhatsApp...');
       initializeWhatsApp();
     }, 5000);
+  });
+
+  client.on('loading_screen', (percent, message) => {
+    console.log('⏳ Loading WhatsApp Web:', percent + '%', message);
+  });
+
+  client.on('change_state', (state) => {
+    console.log('🔄 WhatsApp state changed to:', state);
   });
 
   client.on('message_create', (message) => {
     // Log incoming messages (optional)
     if (message.fromMe) return;
-    console.log('Message received:', message.body);
+    console.log('📨 Message received from:', message.from, 'Content:', message.body?.substring(0, 50) + '...');
   });
 
   // Initialize the client with error handling
+  console.log('🚀 Starting WhatsApp client initialization process...');
   try {
     client.initialize();
+    console.log('✅ Client.initialize() called successfully');
   } catch (error) {
-    console.error('Error initializing WhatsApp client:', error);
+    console.error('❌ Error initializing WhatsApp client:', error);
+    console.error('📋 Error stack:', error.stack);
     // Retry after a delay
+    console.log('⏰ Scheduling retry in 10 seconds...');
     setTimeout(() => {
-      console.log('Retrying WhatsApp initialization...');
+      console.log('🔄 Retrying WhatsApp initialization...');
       initializeWhatsApp();
     }, 10000);
   }
@@ -181,22 +207,28 @@ const initializeWhatsApp = () => {
 
 // Utility function to format phone number
 const formatPhoneNumber = (mobile) => {
+  console.log('📞 Formatting phone number:', mobile);
   // Remove all non-digit characters
   let cleaned = mobile.replace(/\D/g, '');
   
   // Add country code if not present (assuming India +91)
   if (cleaned.length === 10) {
     cleaned = '91' + cleaned;
+    console.log('📞 Added country code 91 for 10-digit number');
   } else if (cleaned.startsWith('0')) {
     cleaned = '91' + cleaned.substring(1);
+    console.log('📞 Replaced leading 0 with country code 91');
   }
   
-  return cleaned + '@c.us';
+  const formatted = cleaned + '@c.us';
+  console.log('📞 Final formatted number:', formatted);
+  return formatted;
 };
 
 // Utility function to replace template placeholders
 const processMessageTemplate = (template, contact) => {
-  return template
+  console.log('📝 Processing message template for contact:', contact.name || contact.mobile);
+  const processed = template
     .replace(/\{\{name\}\}/g, contact.name || '')
     .replace(/\{\{company\}\}/g, contact.company || '')
     .replace(/\{\{email\}\}/g, contact.email || '')
@@ -209,16 +241,24 @@ const processMessageTemplate = (template, contact) => {
 
 // Get WhatsApp connection status
 app.get('/api/whatsapp/status', (req, res) => {
+  console.log('📊 Status check requested from:', req.ip);
+  
   let status = 'disconnected';
   
   if (qrCodeData) {
     status = 'qr-ready';
+    console.log('📱 Status: QR code is ready for scanning');
   } else if (isClientReady) {
     status = 'ready';
+    console.log('✅ Status: WhatsApp client is ready');
   } else if (client && client.pupPage) {
     status = 'connecting';
+    console.log('🔄 Status: WhatsApp client is connecting');
+  } else {
+    console.log('❌ Status: WhatsApp client is disconnected');
   }
 
+  console.log('📤 Sending status response:', status);
   res.json({
     status,
     qrCode: qrCodeData,
@@ -443,7 +483,9 @@ app.post('/api/whatsapp/disconnect', async (req, res) => {
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-  res.json({
+  console.log('🩺 Health check requested from:', req.ip);
+  
+  const healthData = {
     status: 'OK',
     server: 'Energenie WhatsApp Server',
     version: '1.0.0',
@@ -452,12 +494,23 @@ app.get('/api/health', (req, res) => {
       connected: isClientReady,
       hasQR: !!qrCodeData
     }
-  });
+  };
+  
+  console.log('📤 Health check response:', JSON.stringify(healthData, null, 2));
+  res.json(healthData);
 });
 
 // Error handling middleware
 app.use((error, req, res, next) => {
-  console.error('Server error:', error);
+  console.error('❌ Server error occurred:', error);
+  console.error('📋 Error stack:', error.stack);
+  console.error('🌐 Request details:', {
+    method: req.method,
+    url: req.url,
+    ip: req.ip,
+    userAgent: req.get('User-Agent')
+  });
+  
   res.status(500).json({
     success: false,
     message: 'Internal server error',
@@ -470,10 +523,17 @@ app.listen(PORT, () => {
   console.log(`🚀 Energenie WhatsApp Server running on port ${PORT}`);
   console.log(`📱 API endpoints available at http://localhost:${PORT}/api/`);
   console.log(`🔗 Health check: http://localhost:${PORT}/api/health`);
+  console.log(`⚙️ Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🕐 Server started at: ${new Date().toISOString()}`);
+  console.log(`🔧 Process ID: ${process.pid}`);
+  console.log(`💾 Node.js version: ${process.version}`);
+  console.log(`🖥️ Platform: ${process.platform} ${process.arch}`);
   
   // Auto-initialize WhatsApp on server start
   console.log('🔄 Auto-initializing WhatsApp connection...');
+  console.log('⏰ Starting initialization in 2 seconds...');
   setTimeout(() => {
+    console.log('🎯 Initializing WhatsApp now...');
     initializeWhatsApp();
   }, 2000);
 });
@@ -481,17 +541,20 @@ app.listen(PORT, () => {
 // Error handling for uncaught exceptions
 process.on('uncaughtException', (error) => {
   console.error('❌ Uncaught Exception:', error);
+  console.error('📋 Exception stack:', error.stack);
   // Don't exit, just log the error
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+  console.error('📋 Rejection details:', reason);
   // Don't exit, just log the error
 });
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
-  console.log('\n🛑 Shutting down server...');
+  console.log('\n🛑 Shutting down server gracefully...');
+  console.log('📱 Disconnecting WhatsApp client...');
   if (client) {
     console.log('📱 Disconnecting WhatsApp...');
     try {

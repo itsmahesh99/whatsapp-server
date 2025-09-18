@@ -43,7 +43,10 @@ const initializeWhatsApp = () => {
     }),
     puppeteer: {
       headless: true,
-      timeout: 60000,
+      timeout: 0, // Disable timeout
+      handleSIGINT: false,
+      handleSIGTERM: false,
+      handleSIGHUP: false,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -86,6 +89,33 @@ const initializeWhatsApp = () => {
         '--force-color-profile=srgb',
         '--memory-pressure-off',
         '--max_old_space_size=4096',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=VizDisplayCompositor,site-per-process',
+        '--flag-switches-begin',
+        '--flag-switches-end',
+        '--disable-crash-reporter',
+        '--disable-in-process-stack-traces',
+        '--disable-logging',
+        '--disable-dev-tools',
+        '--allow-pre-commit-input',
+        '--allow-running-insecure-content',
+        '--autoplay-policy=user-gesture-required',
+        '--disable-component-update',
+        '--disable-domain-reliability',
+        '--disable-features=AudioServiceOutOfProcess,TranslateUI',
+        '--disable-print-preview',
+        '--disable-reading-from-canvas',
+        '--disable-software-rasterizer',
+        '--disable-background-networking',
+        '--disable-background-timer-throttling',
+        '--disable-back-forward-cache',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-features=TranslateUI,BlinkGenPropertyTrees',
+        '--disable-ipc-flooding-protection',
+        '--disable-renderer-backgrounding',
+        '--disable-field-trial-config',
+        '--no-pings',
+        '--no-session-id',
         '--remote-debugging-port=9222',
         '--remote-debugging-address=0.0.0.0'
       ]
@@ -448,12 +478,27 @@ app.listen(PORT, () => {
   }, 2000);
 });
 
+// Error handling for uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('❌ Uncaught Exception:', error);
+  // Don't exit, just log the error
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+  // Don't exit, just log the error
+});
+
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('\n🛑 Shutting down server...');
   if (client) {
     console.log('📱 Disconnecting WhatsApp...');
-    await client.destroy();
+    try {
+      await client.destroy();
+    } catch (error) {
+      console.error('Error destroying client:', error);
+    }
   }
   process.exit(0);
 });
@@ -462,7 +507,11 @@ process.on('SIGTERM', async () => {
   console.log('\n🛑 Shutting down server...');
   if (client) {
     console.log('📱 Disconnecting WhatsApp...');
-    await client.destroy();
+    try {
+      await client.destroy();
+    } catch (error) {
+      console.error('Error destroying client:', error);
+    }
   }
   process.exit(0);
 });

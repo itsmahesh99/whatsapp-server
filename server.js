@@ -10,11 +10,19 @@ const PORT = process.env.PORT || 3001;
 // Middleware
 const corsOrigins = process.env.CORS_ORIGINS 
   ? process.env.CORS_ORIGINS.split(',')
-  : ['http://localhost:3000'];
+  : [
+    'http://localhost:3000',
+    'https://localhost:3000',
+    'http://localhost:3001',
+    'https://localhost:3001',
+    'https://formserver.energenie.io'
+  ];
 
 app.use(cors({
   origin: corsOrigins,
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
 
@@ -35,6 +43,7 @@ const initializeWhatsApp = () => {
     }),
     puppeteer: {
       headless: true,
+      timeout: 60000,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -53,6 +62,30 @@ const initializeWhatsApp = () => {
         '--disable-default-apps',
         '--disable-web-security',
         '--disable-features=VizDisplayCompositor',
+        '--disable-features=site-per-process',
+        '--disable-hang-monitor',
+        '--disable-client-side-phishing-detection',
+        '--disable-popup-blocking',
+        '--disable-prompt-on-repost',
+        '--disable-sync',
+        '--disable-translate',
+        '--metrics-recording-only',
+        '--no-crash-upload',
+        '--disable-logging',
+        '--disable-login-animations',
+        '--disable-notifications',
+        '--disable-permissions-api',
+        '--disable-plugins',
+        '--disable-speech-api',
+        '--hide-scrollbars',
+        '--mute-audio',
+        '--no-default-browser-check',
+        '--no-service-autorun',
+        '--password-store=basic',
+        '--use-mock-keychain',
+        '--force-color-profile=srgb',
+        '--memory-pressure-off',
+        '--max_old_space_size=4096',
         '--remote-debugging-port=9222',
         '--remote-debugging-address=0.0.0.0'
       ]
@@ -89,6 +122,12 @@ const initializeWhatsApp = () => {
     console.log('WhatsApp client disconnected:', reason);
     isClientReady = false;
     qrCodeData = null;
+    
+    // Retry initialization after disconnect
+    setTimeout(() => {
+      console.log('Attempting to reconnect WhatsApp...');
+      initializeWhatsApp();
+    }, 5000);
   });
 
   client.on('message_create', (message) => {
@@ -97,8 +136,17 @@ const initializeWhatsApp = () => {
     console.log('Message received:', message.body);
   });
 
-  // Initialize the client
-  client.initialize();
+  // Initialize the client with error handling
+  try {
+    client.initialize();
+  } catch (error) {
+    console.error('Error initializing WhatsApp client:', error);
+    // Retry after a delay
+    setTimeout(() => {
+      console.log('Retrying WhatsApp initialization...');
+      initializeWhatsApp();
+    }, 10000);
+  }
 };
 
 // Utility function to format phone number

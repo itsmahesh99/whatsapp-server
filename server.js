@@ -1,5 +1,8 @@
 const express = require('express');
 const cors = require('cors');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 require('dotenv').config();
@@ -68,6 +71,48 @@ app.use(cors({
 console.log('🔧 CORS configured to allow all origins (debug mode)');
 console.log('📋 Intended origins:', corsOrigins);
 app.use(express.json());
+
+// Configure multer for file uploads
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    // Generate unique filename with timestamp
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 100 * 1024 * 1024, // 100MB limit
+    files: 10 // Max 10 files per request
+  },
+  fileFilter: function (req, file, cb) {
+    // Allow specific file types for WhatsApp
+    const allowedTypes = [
+      'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+      'video/mp4', 'video/avi', 'video/mov', 'video/wmv',
+      'application/pdf',
+      'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'audio/mp3', 'audio/wav', 'audio/ogg'
+    ];
+    
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`File type ${file.mimetype} is not supported`), false);
+    }
+  }
+});
 
 // WhatsApp client
 let client = null;
@@ -428,6 +473,17 @@ const processMessageTemplate = (template, contact) => {
 
 // API Routes
 
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    version: process.version
+  });
+});
+
 // Get WhatsApp connection status
 app.get('/api/whatsapp/status', (req, res) => {
   console.log('📊 Status check requested from:', req.ip);
@@ -560,7 +616,7 @@ app.post('/api/whatsapp/send-bulk', async (req, res) => {
       });
     }
 
-    const { contacts, template } = req.body;
+    const { contacts, template, url } = req.body;
     
     if (!contacts || !Array.isArray(contacts) || contacts.length === 0) {
       return res.status(400).json({
@@ -569,10 +625,10 @@ app.post('/api/whatsapp/send-bulk', async (req, res) => {
       });
     }
 
-    if (!template) {
+    if (!template && !url) {
       return res.status(400).json({
         success: false,
-        message: 'Message template is required'
+        message: 'Message template or URL is required'
       });
     }
 
@@ -607,7 +663,19 @@ app.post('/api/whatsapp/send-bulk', async (req, res) => {
           continue;
         }
         
-        const processedMessage = processMessageTemplate(template, contact);
+        let processedMessage = '';
+        
+        if (template) {
+          processedMessage = processMessageTemplate(template, contact);
+        }
+        
+        if (url) {
+          if (processedMessage) {
+            processedMessage += `\n\n🔗 ${url}`;
+          } else {
+            processedMessage = `🔗 ${url}`;
+          }
+        }
 
         // Check if number exists on WhatsApp with retry logic
         let numberId;
@@ -739,6 +807,172 @@ app.post('/api/whatsapp/send-bulk', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to send bulk messages: ' + error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Send multimedia messages to multiple contacts (bulk messaging with attachments)
+app.post('/api/whatsapp/send-bulk-multimedia', upload.array('attachment'), async (req, res) => {
+  try {
+    console.log('📤 Multimedia bulk send request received');
+    
+    if (!isClientReady) {
+      return res.status(400).json({
+        success: false,
+        message: 'WhatsApp client is not ready. Please initialize connection first.'
+      });
+    }
+
+    // Parse the data from FormData
+    const data = JSON.parse(req.body.data);
+    const { contacts, template, url } = data;
+    const attachments = req.files || [];
+    
+    console.log(`📋 Processing ${contacts.length} contacts with ${attachments.length} attachments`);
+    
+    if (!contacts || !Array.isArray(contacts) || contacts.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Contacts array is required'
+      });
+    }
+
+    if (!template && attachments.length === 0 && !url) {
+      return res.status(400).json({
+        success: false,
+        message: 'Message template, attachments, or URL is required'
+      });
+    }
+
+    const results = {
+      total: contacts.length,
+      sent: 0,
+      failed: 0,
+      details: []
+    };
+
+    // Send messages with delay to avoid rate limiting
+    for (let i = 0; i < contacts.length; i++) {
+      const contact = contacts[i];
+      
+      try {
+        console.log(`Processing multimedia contact ${i + 1}/${contacts.length}: ${contact.name || 'Unknown'} - ${contact.mobile}`);
+        
+        const chatId = formatPhoneNumber(contact.mobile);
+        
+        if (!chatId) {
+          console.error(`❌ Invalid phone number for ${contact.name}: ${contact.mobile}`);
+          results.failed++;
+          results.details.push({
+            contact: contact.name || 'Unknown',
+            phone: contact.mobile,
+            status: 'failed',
+            reason: 'Invalid phone number format'
+          });
+          continue;
+        }
+
+        // Send text message if provided
+        if (template) {
+          let processedMessage = template;
+          
+          // Replace variables in template
+          if (contact.name) {
+            processedMessage = processedMessage.replace(/\{\{name\}\}/g, contact.name);
+          }
+          if (contact.company) {
+            processedMessage = processedMessage.replace(/\{\{company\}\}/g, contact.company);
+          }
+          
+          // Add URL if provided
+          if (url) {
+            processedMessage += `\n\n🔗 ${url}`;
+          }
+
+          await client.sendMessage(chatId, processedMessage);
+          console.log(`✅ Text message sent to ${contact.name}`);
+        }
+
+        // Send attachments
+        for (let j = 0; j < attachments.length; j++) {
+          const attachment = attachments[j];
+          const media = MessageMedia.fromFilePath(attachment.path);
+          media.filename = attachment.originalname;
+          
+          await client.sendMessage(chatId, media);
+          console.log(`✅ Attachment ${j + 1} sent to ${contact.name}: ${attachment.originalname}`);
+          
+          // Small delay between attachments
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+        results.sent++;
+        results.details.push({
+          contact: contact.name || 'Unknown',
+          phone: contact.mobile,
+          status: 'sent',
+          attachments: attachments.length,
+          hasText: !!template,
+          hasUrl: !!url
+        });
+
+        // Delay between contacts to avoid rate limiting
+        if (i < contacts.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+
+      } catch (error) {
+        console.error(`❌ Failed to send multimedia message to ${contact.name}:`, error.message);
+        results.failed++;
+        results.details.push({
+          contact: contact.name || 'Unknown',
+          phone: contact.mobile,
+          status: 'failed',
+          reason: error.message
+        });
+      }
+    }
+
+    // Clean up uploaded files
+    try {
+      for (const attachment of attachments) {
+        if (fs.existsSync(attachment.path)) {
+          fs.unlinkSync(attachment.path);
+          console.log(`🗑️ Cleaned up file: ${attachment.filename}`);
+        }
+      }
+    } catch (cleanupError) {
+      console.warn('⚠️ Error cleaning up files:', cleanupError.message);
+    }
+
+    console.log(`📊 Multimedia bulk send complete: ${results.sent} sent, ${results.failed} failed`);
+    
+    res.json({
+      success: true,
+      results: results,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('Error in multimedia bulk messaging:', error);
+    
+    // Clean up uploaded files on error
+    if (req.files) {
+      for (const file of req.files) {
+        try {
+          if (fs.existsSync(file.path)) {
+            fs.unlinkSync(file.path);
+          }
+        } catch (cleanupError) {
+          console.warn('⚠️ Error cleaning up file on error:', cleanupError.message);
+        }
+      }
+    }
+    
+    res.status(500).json({
+      success: false,
+      message: 'Failed to send multimedia messages: ' + error.message,
       timestamp: new Date().toISOString()
     });
   }

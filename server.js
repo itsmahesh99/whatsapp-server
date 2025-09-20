@@ -813,7 +813,7 @@ app.post('/api/whatsapp/send-bulk', async (req, res) => {
 });
 
 // Send multimedia messages to multiple contacts (bulk messaging with attachments)
-app.post('/api/whatsapp/send-bulk-multimedia', upload.array('attachment'), async (req, res) => {
+app.post('/api/whatsapp/send-bulk-multimedia', upload.any(), async (req, res) => {
   try {
     console.log('📤 Multimedia bulk send request received');
     

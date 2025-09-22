@@ -873,38 +873,77 @@ app.post('/api/whatsapp/send-bulk-multimedia', upload.any(), async (req, res) =>
           continue;
         }
 
-        // Send text message if provided
-        if (template) {
-          let processedMessage = template;
-          
-          // Replace variables in template
-          if (contact.name) {
-            processedMessage = processedMessage.replace(/\{\{name\}\}/g, contact.name);
-          }
-          if (contact.company) {
-            processedMessage = processedMessage.replace(/\{\{company\}\}/g, contact.company);
-          }
-          
-          // Add URL if provided
-          if (url) {
-            processedMessage += `\n\n🔗 ${url}`;
-          }
-
-          await client.sendMessage(chatId, processedMessage);
-          console.log(`✅ Text message sent to ${contact.name}`);
+        // Ensure session is healthy before proceeding
+        if (!(await waitForSession())) {
+          console.warn('⚠️ Session not ready for multimedia send');
+          results.failed++;
+          results.details.push({
+            contact: contact.name || 'Unknown',
+            phone: contact.mobile,
+            status: 'failed',
+            reason: 'WhatsApp session not ready'
+          });
+          continue;
         }
 
-        // Send attachments
+        // Check if number exists on WhatsApp with simple retry logic
+        let numberId = null;
+        for (let retry = 0; retry < 3; retry++) {
+          try {
+            numberId = await client.getNumberId(chatId);
+            break;
+          } catch (e) {
+            console.warn(`⚠️ getNumberId failed (attempt ${retry + 1}/3):`, e.message);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+
+        if (!numberId) {
+          console.warn(`⚠️ Number not on WhatsApp: ${chatId}`);
+          results.failed++;
+          results.details.push({
+            contact: contact.name || 'Unknown',
+            phone: contact.mobile,
+            status: 'failed',
+            reason: 'Number not registered on WhatsApp'
+          });
+          continue;
+        }
+
+        // Prepare processed message (optional)
+        let processedMessage = '';
+        if (template) {
+          processedMessage = processMessageTemplate(template, contact);
+        }
+        if (url) {
+          processedMessage = processedMessage
+            ? `${processedMessage}\n\n🔗 ${url}`
+            : `🔗 ${url}`;
+        }
+
+        // Send text first (if any)
+        if (processedMessage) {
+          if (!(await waitForSession())) {
+            throw new Error('Session lost before sending text');
+          }
+          await client.sendMessage(chatId, processedMessage);
+          console.log(`✅ Text message sent to ${contact.name}`);
+          // Short delay to respect rate limits
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+        // Send attachments (if any)
         for (let j = 0; j < attachments.length; j++) {
+          if (!(await waitForSession())) {
+            throw new Error('Session lost before sending attachment');
+          }
           const attachment = attachments[j];
           const media = MessageMedia.fromFilePath(attachment.path);
           media.filename = attachment.originalname;
-          
           await client.sendMessage(chatId, media);
           console.log(`✅ Attachment ${j + 1} sent to ${contact.name}: ${attachment.originalname}`);
-          
           // Small delay between attachments
-          await new Promise(resolve => setTimeout(resolve, 500));
+          await new Promise(resolve => setTimeout(resolve, 600));
         }
 
         results.sent++;
@@ -919,7 +958,7 @@ app.post('/api/whatsapp/send-bulk-multimedia', upload.any(), async (req, res) =>
 
         // Delay between contacts to avoid rate limiting
         if (i < contacts.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          await new Promise(resolve => setTimeout(resolve, 2500));
         }
 
       } catch (error) {

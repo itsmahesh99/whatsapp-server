@@ -818,10 +818,18 @@ app.post('/api/whatsapp/send-bulk-multimedia', upload.any(), async (req, res) =>
     console.log('📤 Multimedia bulk send request received');
     
     if (!isClientReady) {
-      return res.status(400).json({
-        success: false,
-        message: 'WhatsApp client is not ready. Please initialize connection first.'
-      });
+      console.log('⚠️ Client not ready at start of multimedia send. Attempting recovery...');
+      if (!(await waitForSession(5, 2000))) {
+        console.log('🔄 Session still not ready. Reinitializing WhatsApp client...');
+        try { initializeWhatsApp(); } catch (e) { console.warn('⚠️ Error calling initializeWhatsApp:', e.message); }
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        if (!(await waitForSession(5, 2000))) {
+          return res.status(400).json({
+            success: false,
+            message: 'WhatsApp client is not ready. Please initialize connection first.'
+          });
+        }
+      }
     }
 
     // Parse the data from FormData

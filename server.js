@@ -969,7 +969,19 @@ app.post('/api/whatsapp/send-bulk-multimedia', upload.any(), async (req, res) =>
             media.filename = attachment.originalname; // keep original name for recipient
           }
 
-          await client.sendMessage(chatId, media);
+          console.log('📎 Sending attachment', {
+            resolvedFilePath,
+            mimetype: attachment.mimetype,
+            size: attachment.size
+          });
+
+          try {
+            await client.sendMessage(chatId, media);
+          } catch (e) {
+            console.warn('⚠️ Sending as regular media failed, retrying as document:', e.message);
+            await client.sendMessage(chatId, media, { sendMediaAsDocument: true });
+          }
+
           console.log(`✅ Attachment ${j + 1} sent to ${contact.name}: ${attachment.originalname || attachment.filename}`);
           // Small delay between attachments
           await new Promise(resolve => setTimeout(resolve, 600));

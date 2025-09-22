@@ -938,10 +938,31 @@ app.post('/api/whatsapp/send-bulk-multimedia', upload.any(), async (req, res) =>
             throw new Error('Session lost before sending attachment');
           }
           const attachment = attachments[j];
-          const media = MessageMedia.fromFilePath(attachment.path);
-          media.filename = attachment.originalname;
+
+          // Multer v2 may not include attachment.path; construct robustly
+          const resolvedFilePath = attachment.path
+            || (attachment.destination && attachment.filename
+                  ? path.join(attachment.destination, attachment.filename)
+                  : path.join(uploadDir, attachment.filename || ''));
+
+          if (!resolvedFilePath || !fs.existsSync(resolvedFilePath)) {
+            console.error('❌ Attachment file not found or path unresolved', {
+              hasPath: !!attachment.path,
+              destination: attachment.destination,
+              filename: attachment.filename,
+              originalname: attachment.originalname,
+              size: attachment.size
+            });
+            throw new Error('Attachment file not found on server');
+          }
+
+          const media = MessageMedia.fromFilePath(resolvedFilePath);
+          if (attachment.originalname) {
+            media.filename = attachment.originalname; // keep original name for recipient
+          }
+
           await client.sendMessage(chatId, media);
-          console.log(`✅ Attachment ${j + 1} sent to ${contact.name}: ${attachment.originalname}`);
+          console.log(`✅ Attachment ${j + 1} sent to ${contact.name}: ${attachment.originalname || attachment.filename}`);
           // Small delay between attachments
           await new Promise(resolve => setTimeout(resolve, 600));
         }
@@ -976,9 +997,13 @@ app.post('/api/whatsapp/send-bulk-multimedia', upload.any(), async (req, res) =>
     // Clean up uploaded files
     try {
       for (const attachment of attachments) {
-        if (fs.existsSync(attachment.path)) {
-          fs.unlinkSync(attachment.path);
-          console.log(`🗑️ Cleaned up file: ${attachment.filename}`);
+        const cleanupPath = attachment.path
+          || (attachment.destination && attachment.filename
+                ? path.join(attachment.destination, attachment.filename)
+                : path.join(uploadDir, attachment.filename || ''));
+        if (cleanupPath && fs.existsSync(cleanupPath)) {
+          fs.unlinkSync(cleanupPath);
+          console.log(`🗑️ Cleaned up file: ${attachment.originalname || attachment.filename}`);
         }
       }
     } catch (cleanupError) {
@@ -987,8 +1012,9 @@ app.post('/api/whatsapp/send-bulk-multimedia', upload.any(), async (req, res) =>
 
     console.log(`📊 Multimedia bulk send complete: ${results.sent} sent, ${results.failed} failed`);
     
-    res.json({
-      success: true,
+    res.status(results.failed > 0 ? 207 : 200).json({
+      success: results.failed === 0,
+      message: `Sent: ${results.sent}, Failed: ${results.failed}`,
       results: results,
       timestamp: new Date().toISOString()
     });

@@ -639,6 +639,12 @@ const safeSendMedia = async (chatId, media, options = {}, originalFilePath = nul
   try {
     console.log('📤 Starting enhanced safeSendMedia with WhatsApp internal processing');
     console.log('📁 Original file path:', originalFilePath);
+    console.log('📊 Media object:', { 
+      mimetype: media.mimetype, 
+      filename: media.filename,
+      hasData: !!media.data,
+      dataLength: media.data ? media.data.length : 0
+    });
     
     // Method 1: Try WhatsApp's internal media processing pipeline
     if (originalFilePath && fs.existsSync(originalFilePath)) {
@@ -646,64 +652,64 @@ const safeSendMedia = async (chatId, media, options = {}, originalFilePath = nul
         console.log('🎯 Method 1: WhatsApp internal media processing');
         
         // Process media using WhatsApp's internal functions
-        const processedMedia = await client.pupPage.evaluate(async (filePath) => {
+        const processedMedia = await client.pupPage.evaluate(async (filePath, mediaData) => {
           try {
-            // Read file data using fetch API
-            const response = await fetch(`file://${filePath}`);
-            if (!response.ok) throw new Error('Could not read file');
+            console.log('🔧 Starting browser-side WhatsApp internal processing');
+            console.log('📁 File path received:', filePath);
             
-            const arrayBuffer = await response.arrayBuffer();
-            const uint8Array = new Uint8Array(arrayBuffer);
-            
-            // Convert to base64
-            let binary = '';
-            uint8Array.forEach(byte => binary += String.fromCharCode(byte));
-            const base64Data = btoa(binary);
-            
-            // Determine mimetype
-            const extension = filePath.split('.').pop().toLowerCase();
-            const mimetypeMap = {
-              'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
-              'png': 'image/png', 'gif': 'image/gif',
-              'webp': 'image/webp', 'bmp': 'image/bmp',
-              'tiff': 'image/tiff', 'svg': 'image/svg+xml'
-            };
-            const mimetype = mimetypeMap[extension] || 'application/octet-stream';
-            
-            // Create media info object for WhatsApp processing
-            const mediaInfo = {
-              mimetype: mimetype,
-              data: base64Data,
-              filename: filePath.split(/[/\\]/).pop()
-            };
-            
-            // Use WhatsApp's internal processMediaData function if available
-            if (window.WWebJS && window.WWebJS.processMediaData) {
-              console.log('🔧 Using WhatsApp internal processMediaData');
-              const processedData = await window.WWebJS.processMediaData(mediaInfo, {
-                forceDocument: false,
-                forceVoice: false,
-                forceGif: false
-              });
-              return { success: true, data: processedData, method: 'whatsapp-internal' };
+            // Check if WhatsApp internal functions are available
+            if (!window.WWebJS) {
+              console.log('❌ window.WWebJS not available');
+              return { success: false, error: 'WWebJS not available' };
             }
             
-            // Fallback: Return media info for standard processing
-            return { success: true, data: mediaInfo, method: 'standard-fallback' };
+            if (!window.WWebJS.processMediaData) {
+              console.log('❌ window.WWebJS.processMediaData not available');
+              return { success: false, error: 'processMediaData not available' };
+            }
+            
+            console.log('✅ WhatsApp internal functions available');
+            
+            // Use the media data passed from server instead of trying to read file
+            const mediaInfo = {
+              mimetype: mediaData.mimetype,
+              data: mediaData.data,
+              filename: mediaData.filename || filePath.split(/[/\\]/).pop()
+            };
+            
+            console.log('🔧 Processing media with WhatsApp internal pipeline');
+            console.log('📊 Media info:', { 
+              mimetype: mediaInfo.mimetype, 
+              filename: mediaInfo.filename,
+              dataLength: mediaInfo.data.length 
+            });
+            
+            // Use WhatsApp's internal processMediaData function
+            const processedData = await window.WWebJS.processMediaData(mediaInfo, {
+              forceDocument: false,
+              forceVoice: false,
+              forceGif: false
+            });
+            
+            console.log('✅ WhatsApp internal processing completed successfully');
+            return { success: true, data: processedData, method: 'whatsapp-internal' };
             
           } catch (error) {
             console.log('❌ Internal processing error:', error.message);
-            return { success: false, error: error.message };
+            console.log('❌ Error stack:', error.stack);
+            return { success: false, error: error.message, stack: error.stack };
           }
-        }, originalFilePath);
+        }, originalFilePath, media);
         
         if (processedMedia.success) {
           console.log(`✅ WhatsApp processing succeeded using ${processedMedia.method} method`);
+          console.log('📊 Processed data keys:', Object.keys(processedMedia.data));
           
           // Create MessageMedia object from processed data
           let processedMediaObj;
           if (processedMedia.method === 'whatsapp-internal') {
             // Use processed data from WhatsApp's internal pipeline
+            console.log('🎯 Using WhatsApp internal pipeline result');
             processedMediaObj = new MessageMedia(
               processedMedia.data.mimetype || processedMedia.data.type,
               processedMedia.data.data,
@@ -711,6 +717,7 @@ const safeSendMedia = async (chatId, media, options = {}, originalFilePath = nul
             );
           } else {
             // Use standard media object
+            console.log('🎯 Using standard media object');
             processedMediaObj = new MessageMedia(
               processedMedia.data.mimetype,
               processedMedia.data.data,
@@ -721,6 +728,12 @@ const safeSendMedia = async (chatId, media, options = {}, originalFilePath = nul
           await client.sendMessage(chatId, processedMediaObj, options);
           console.log('✅ Method 1 succeeded - WhatsApp internal processing worked');
           return;
+        } else {
+          console.log('❌ Method 1 failed - WhatsApp internal processing unsuccessful');
+          console.log('❌ Failure reason:', processedMedia.error);
+          if (processedMedia.stack) {
+            console.log('❌ Error stack:', processedMedia.stack);
+          }
         }
       } catch (error) {
         console.log('❌ Method 1 failed:', error.message);

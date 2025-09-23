@@ -637,11 +637,103 @@ const getMediaTypeInfo = (mimetype) => {
 // Utility function to safely send media with canvas error handling
 const safeSendMedia = async (chatId, media, options = {}, originalFilePath = null) => {
   try {
-    console.log('📤 Attempting to send media with options:', Object.keys(options));
+    console.log('📤 Starting enhanced safeSendMedia with WhatsApp internal processing');
+    console.log('📁 Original file path:', originalFilePath);
+    
+    // Method 1: Try WhatsApp's internal media processing pipeline
+    if (originalFilePath && fs.existsSync(originalFilePath)) {
+      try {
+        console.log('🎯 Method 1: WhatsApp internal media processing');
+        
+        // Process media using WhatsApp's internal functions
+        const processedMedia = await client.pupPage.evaluate(async (filePath) => {
+          try {
+            // Read file data using fetch API
+            const response = await fetch(`file://${filePath}`);
+            if (!response.ok) throw new Error('Could not read file');
+            
+            const arrayBuffer = await response.arrayBuffer();
+            const uint8Array = new Uint8Array(arrayBuffer);
+            
+            // Convert to base64
+            let binary = '';
+            uint8Array.forEach(byte => binary += String.fromCharCode(byte));
+            const base64Data = btoa(binary);
+            
+            // Determine mimetype
+            const extension = filePath.split('.').pop().toLowerCase();
+            const mimetypeMap = {
+              'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
+              'png': 'image/png', 'gif': 'image/gif',
+              'webp': 'image/webp', 'bmp': 'image/bmp',
+              'tiff': 'image/tiff', 'svg': 'image/svg+xml'
+            };
+            const mimetype = mimetypeMap[extension] || 'application/octet-stream';
+            
+            // Create media info object for WhatsApp processing
+            const mediaInfo = {
+              mimetype: mimetype,
+              data: base64Data,
+              filename: filePath.split(/[/\\]/).pop()
+            };
+            
+            // Use WhatsApp's internal processMediaData function if available
+            if (window.WWebJS && window.WWebJS.processMediaData) {
+              console.log('🔧 Using WhatsApp internal processMediaData');
+              const processedData = await window.WWebJS.processMediaData(mediaInfo, {
+                forceDocument: false,
+                forceVoice: false,
+                forceGif: false
+              });
+              return { success: true, data: processedData, method: 'whatsapp-internal' };
+            }
+            
+            // Fallback: Return media info for standard processing
+            return { success: true, data: mediaInfo, method: 'standard-fallback' };
+            
+          } catch (error) {
+            console.log('❌ Internal processing error:', error.message);
+            return { success: false, error: error.message };
+          }
+        }, originalFilePath);
+        
+        if (processedMedia.success) {
+          console.log(`✅ WhatsApp processing succeeded using ${processedMedia.method} method`);
+          
+          // Create MessageMedia object from processed data
+          let processedMediaObj;
+          if (processedMedia.method === 'whatsapp-internal') {
+            // Use processed data from WhatsApp's internal pipeline
+            processedMediaObj = new MessageMedia(
+              processedMedia.data.mimetype || processedMedia.data.type,
+              processedMedia.data.data,
+              processedMedia.data.filename
+            );
+          } else {
+            // Use standard media object
+            processedMediaObj = new MessageMedia(
+              processedMedia.data.mimetype,
+              processedMedia.data.data,
+              processedMedia.data.filename
+            );
+          }
+          
+          await client.sendMessage(chatId, processedMediaObj, options);
+          console.log('✅ Method 1 succeeded - WhatsApp internal processing worked');
+          return;
+        }
+      } catch (error) {
+        console.log('❌ Method 1 failed:', error.message);
+      }
+    }
+    
+    // Method 2: Standard media send
+    console.log('🎯 Method 2: Standard media send');
     await client.sendMessage(chatId, media, options);
-    console.log('✅ Media sent successfully');
+    console.log('✅ Method 2 succeeded - Standard send worked');
+    
   } catch (error) {
-    console.warn('⚠️ Media send failed:', error.message);
+    console.warn('⚠️ Standard media send failed:', error.message);
     
     // Handle canvas security errors specifically
     if (error.message.includes('Tainted canvases') || 
@@ -655,9 +747,9 @@ const safeSendMedia = async (chatId, media, options = {}, originalFilePath = nul
       if (media.mimetype && media.mimetype.startsWith('image/')) {
         console.log('🖼️ Trying alternative image sending methods...');
         
-        // Method 1: Try sending without any special options (basic image)
+        // Method 3: Try sending without any special options (basic image)
         try {
-          console.log('📸 Method 1: Basic image send (clean options)');
+          console.log('📸 Method 3: Basic image send (clean options)');
           await client.sendMessage(chatId, media, {});
           console.log('✅ Image sent successfully with basic method');
           return;
@@ -665,10 +757,10 @@ const safeSendMedia = async (chatId, media, options = {}, originalFilePath = nul
           console.warn('⚠️ Basic image send failed:', basicError.message);
         }
         
-        // Method 2: Try creating fresh media object (if we have the file path)
+        // Method 4: Try creating fresh media object (if we have the file path)
         if (originalFilePath) {
           try {
-            console.log('📸 Method 2: Fresh media object from file');
+            console.log('📸 Method 4: Fresh media object from file');
             const freshMedia = createSafeMedia(originalFilePath, media.filename);
             await client.sendMessage(chatId, freshMedia, {});
             console.log('✅ Image sent successfully with fresh media object');
@@ -678,9 +770,9 @@ const safeSendMedia = async (chatId, media, options = {}, originalFilePath = nul
           }
         }
         
-        // Method 3: Try with explicit image options
+        // Method 5: Try with explicit image options
         try {
-          console.log('📸 Method 3: Explicit image options (force preview)');
+          console.log('📸 Method 5: Explicit image options (force preview)');
           await client.sendMessage(chatId, media, { 
             sendMediaAsDocument: false,
             sendMediaAsSticker: false,
@@ -692,9 +784,9 @@ const safeSendMedia = async (chatId, media, options = {}, originalFilePath = nul
           console.warn('⚠️ Explicit options send failed:', explicitError.message);
         }
         
-        // Method 4: Try minimal media object
+        // Method 6: Try minimal media object
         try {
-          console.log('📸 Method 4: Minimal media object');
+          console.log('📸 Method 6: Minimal media object');
           const minimalMedia = new MessageMedia(media.mimetype, media.data, media.filename);
           await client.sendMessage(chatId, minimalMedia, {});
           console.log('✅ Image sent successfully with minimal media object');

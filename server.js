@@ -1600,13 +1600,24 @@ app.post('/api/whatsapp/send-bulk-multimedia', upload.any(), async (req, res) =>
           console.log('📎 Sending attachment', {
             resolvedFilePath,
             mimetype: attachment.mimetype,
-            size: attachment.size
+            size: attachment.size,
+            type: attachment.mimetype ? getMediaTypeInfo(attachment.mimetype).type : 'unknown'
           });
 
           try {
-            await client.sendMessage(chatId, media);
+            // For images and videos, send as regular media for preview
+            if (attachment.mimetype && (attachment.mimetype.startsWith('image/') || attachment.mimetype.startsWith('video/'))) {
+              console.log('📸 Sending as preview-enabled media (image/video)');
+              await client.sendMessage(chatId, media);
+            } else if (attachment.mimetype && attachment.mimetype.startsWith('audio/')) {
+              console.log('🎵 Sending audio as voice message');
+              await client.sendMessage(chatId, media, { sendAudioAsVoice: true });
+            } else {
+              console.log('📄 Sending as document');
+              await client.sendMessage(chatId, media, { sendMediaAsDocument: true });
+            }
           } catch (e) {
-            console.warn('⚠️ Sending as regular media failed, retrying as document:', e.message);
+            console.warn('⚠️ Sending as preferred format failed, retrying as document:', e.message);
             await client.sendMessage(chatId, media, { sendMediaAsDocument: true });
           }
 

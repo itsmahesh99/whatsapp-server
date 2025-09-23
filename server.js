@@ -634,6 +634,39 @@ const getMediaTypeInfo = (mimetype) => {
   return mediaInfo;
 };
 
+// Utility function to safely send media with canvas error handling
+const safeSendMedia = async (chatId, media, options = {}) => {
+  try {
+    console.log('📤 Attempting to send media with options:', Object.keys(options));
+    await client.sendMessage(chatId, media, options);
+    console.log('✅ Media sent successfully');
+  } catch (error) {
+    console.warn('⚠️ Media send failed:', error.message);
+    
+    // Handle canvas security errors specifically
+    if (error.message.includes('Tainted canvases') || 
+        error.message.includes('SecurityError') || 
+        error.message.includes('toDataURL')) {
+      console.warn('🔒 Canvas security issue detected - sending as document instead');
+      
+      // Force document mode to bypass canvas security restrictions
+      const documentOptions = {
+        ...options,
+        sendMediaAsDocument: true,
+        sendMediaAsSticker: false, // Disable sticker mode if it was enabled
+        sendAudioAsVoice: options.sendAudioAsVoice || false, // Keep voice if it was audio
+        sendVideoAsGif: false // Disable GIF mode if it was enabled
+      };
+      
+      await client.sendMessage(chatId, media, documentOptions);
+      console.log('✅ Media sent as document (canvas security workaround)');
+    } else {
+      // Re-throw other errors
+      throw error;
+    }
+  }
+};
+
 // API Routes
 
 // Health check endpoint
@@ -991,7 +1024,13 @@ app.post('/api/whatsapp/send-single-media', upload.single('media'), async (req, 
         caption: processedMessage || undefined
       };
 
-      await client.sendMessage(chatId, media, sendOptions);
+      try {
+        await safeSendMedia(chatId, media, sendOptions);
+      } catch (mediaError) {
+        // If safeSendMedia still fails, it's a different issue
+        console.error('❌ Failed to send media even with safe function:', mediaError.message);
+        throw mediaError;
+      }
 
       // Clean up uploaded file
       if (fs.existsSync(mediaPath)) {
@@ -1193,7 +1232,13 @@ app.post('/api/whatsapp/send-media-url', async (req, res) => {
       caption: processedMessage || undefined
     };
 
-    await client.sendMessage(chatId, media, sendOptions);
+    try {
+      await safeSendMedia(chatId, media, sendOptions);
+    } catch (mediaError) {
+      // If safeSendMedia still fails, it's a different issue
+      console.error('❌ Failed to send media from URL even with safe function:', mediaError.message);
+      throw mediaError;
+    }
 
     res.json({
       success: true,
@@ -1608,17 +1653,19 @@ app.post('/api/whatsapp/send-bulk-multimedia', upload.any(), async (req, res) =>
             // For images and videos, send as regular media for preview
             if (attachment.mimetype && (attachment.mimetype.startsWith('image/') || attachment.mimetype.startsWith('video/'))) {
               console.log('📸 Sending as preview-enabled media (image/video)');
-              await client.sendMessage(chatId, media);
+              
+              // Use safe send function to handle canvas issues
+              await safeSendMedia(chatId, media);
             } else if (attachment.mimetype && attachment.mimetype.startsWith('audio/')) {
               console.log('🎵 Sending audio as voice message');
-              await client.sendMessage(chatId, media, { sendAudioAsVoice: true });
+              await safeSendMedia(chatId, media, { sendAudioAsVoice: true });
             } else {
               console.log('📄 Sending as document');
-              await client.sendMessage(chatId, media, { sendMediaAsDocument: true });
+              await safeSendMedia(chatId, media, { sendMediaAsDocument: true });
             }
           } catch (e) {
             console.warn('⚠️ Sending as preferred format failed, retrying as document:', e.message);
-            await client.sendMessage(chatId, media, { sendMediaAsDocument: true });
+            await safeSendMedia(chatId, media, { sendMediaAsDocument: true });
           }
 
           console.log(`✅ Attachment ${j + 1} sent to ${contact.name}: ${attachment.originalname || attachment.filename}`);

@@ -120,20 +120,48 @@ let isClientReady = false;
 let qrCodeData = null;
 let qrCodeTimestamp = null;
 let qrCodeExpiryTime = 20000; // 20 seconds (typical QR code lifespan)
+let sessionMonitorInterval = null;
+let isShuttingDown = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+let isInitializing = false;
 
 // Initialize WhatsApp client
-const initializeWhatsApp = () => {
+const initializeWhatsApp = async () => {
   console.log('🔄 Starting WhatsApp client initialization...');
   
-  if (client) {
-    console.log('🧹 Destroying existing client...');
-    client.destroy();
+  // Don't initialize if shutting down
+  if (isShuttingDown) {
+    console.log('⚠️ Skipping initialization - server is shutting down');
+    return;
   }
+  
+  // Prevent multiple concurrent initializations
+  if (isInitializing) {
+    console.log('⚠️ Initialization already in progress - skipping');
+    return;
+  }
+  
+  isInitializing = true;
+  
+  try {
+    // Properly destroy existing client
+    if (client) {
+      console.log('🧹 Destroying existing client...');
+      try {
+        await client.destroy();
+        client = null;
+      } catch (error) {
+        console.warn('⚠️ Error destroying existing client:', error.message);
+        client = null;
+      }
+    }
 
-  console.log('⚙️ Creating new WhatsApp client with Puppeteer config...');
+  console.log('⚙️ Creating new WhatsApp client with enhanced session management...');
   client = new Client({
     authStrategy: new LocalAuth({
-      clientId: "energenie-whatsapp"
+      clientId: "energenie-whatsapp",
+      dataPath: './.wwebjs_auth/'
     }),
     puppeteer: {
       headless: true,
@@ -239,21 +267,46 @@ const initializeWhatsApp = () => {
     isClientReady = true;
     qrCodeData = null;
     qrCodeTimestamp = null; // Clear QR data when authenticated
+    reconnectAttempts = 0; // Reset reconnect attempts on successful connection
+    isInitializing = false; // Reset initialization flag
     console.log('🗑️ QR Code data cleared - authentication successful');
     
     // Start session health monitoring
     startSessionMonitor();
   });
 
-  client.on('authenticated', () => {
+  client.on('authenticated', (session) => {
     console.log('🔐 WhatsApp client authenticated successfully');
     console.log('👤 Authentication process completed');
+    console.log('💾 Session data saved automatically by LocalAuth');
   });
 
   client.on('auth_failure', (msg) => {
     console.error('❌ Authentication failed:', msg);
-    console.error('🔄 Will attempt to restart authentication process');
+    console.error('🔄 Will attempt to clear session and restart');
     isClientReady = false;
+    
+    // Clear potentially corrupted session
+    setTimeout(async () => {
+      if (!isShuttingDown) {
+        console.log('🧹 Clearing corrupted session...');
+        try {
+          if (client && client.authStrategy && typeof client.authStrategy.logout === 'function') {
+            await client.authStrategy.logout();
+          }
+        } catch (error) {
+          console.warn('⚠️ Error during session cleanup:', error.message);
+        }
+        
+        // Reinitialize after clearing session
+        setTimeout(async () => {
+          if (!isShuttingDown) {
+            console.log('🔄 Reinitializing after auth failure...');
+            await initializeWhatsApp();
+          }
+        }, 3000);
+      }
+    }, 2000);
   });
 
   client.on('disconnected', (reason) => {
@@ -261,14 +314,43 @@ const initializeWhatsApp = () => {
     console.log('📊 Connection status reset');
     isClientReady = false;
     qrCodeData = null;
-    qrCodeTimestamp = null; // Clear QR data on disconnect
+    qrCodeTimestamp = null;
     
-    // Retry initialization after disconnect
-    console.log('⏰ Scheduling reconnection in 5 seconds...');
-    setTimeout(() => {
-      console.log('🔄 Attempting to reconnect WhatsApp...');
-      initializeWhatsApp();
-    }, 5000);
+    // Clear session monitor
+    if (sessionMonitorInterval) {
+      clearInterval(sessionMonitorInterval);
+      sessionMonitorInterval = null;
+    }
+    
+    // Handle different disconnect reasons
+    if (reason === 'LOGOUT') {
+      console.log('🚪 User logged out - clearing session data');
+      try {
+        if (client && client.authStrategy) {
+          client.authStrategy.logout();
+        }
+      } catch (error) {
+        console.warn('⚠️ Error during logout cleanup:', error.message);
+      }
+      reconnectAttempts = 0; // Reset on intentional logout
+    } else if (!isShuttingDown) {
+      // Only attempt reconnection if not shutting down and not a logout
+      reconnectAttempts++;
+      const delay = Math.min(5000 * reconnectAttempts, 30000); // Exponential backoff with max 30s
+      
+      if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
+        console.log(`⏰ Scheduling reconnection attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${delay/1000} seconds...`);
+        setTimeout(async () => {
+          if (!isShuttingDown) {
+            console.log(`🔄 Attempting to reconnect WhatsApp... (attempt ${reconnectAttempts})`);
+            await initializeWhatsApp();
+          }
+        }, delay);
+      } else {
+        console.error('❌ Maximum reconnection attempts reached. Manual intervention required.');
+        console.log('💡 Try calling /api/whatsapp/initialize to restart the connection');
+      }
+    }
   });
 
   client.on('loading_screen', (percent, message) => {
@@ -295,25 +377,36 @@ const initializeWhatsApp = () => {
     console.error('📋 Error stack:', error.stack);
     // Retry after a delay
     console.log('⏰ Scheduling retry in 10 seconds...');
-    setTimeout(() => {
+    setTimeout(async () => {
       console.log('🔄 Retrying WhatsApp initialization...');
-      initializeWhatsApp();
+      await initializeWhatsApp();
     }, 10000);
+  } finally {
+    isInitializing = false;
   }
+} catch (initError) {
+  console.error('❌ Error in initializeWhatsApp function:', initError);
+  isInitializing = false;
+}
 };
 
 // Session monitoring to detect and handle session issues proactively
-let sessionMonitorInterval;
 const startSessionMonitor = () => {
   // Clear any existing monitor
   if (sessionMonitorInterval) {
     clearInterval(sessionMonitorInterval);
+    sessionMonitorInterval = null;
   }
   
-  console.log('🔍 Starting session health monitor...');
+  console.log('🔍 Starting enhanced session health monitor...');
   
   sessionMonitorInterval = setInterval(async () => {
     try {
+      // Skip monitoring if shutting down
+      if (isShuttingDown) {
+        return;
+      }
+      
       if (!client || !isClientReady) {
         console.log('⚠️ Monitor: Client not ready');
         return;
@@ -321,25 +414,52 @@ const startSessionMonitor = () => {
       
       const healthy = await isSessionHealthy();
       if (!healthy) {
-        console.log('❌ Monitor: Session unhealthy detected');
+        console.log('❌ Monitor: Session unhealthy detected - attempting recovery');
         isClientReady = false;
         
-        // Attempt to reinitialize
-        console.log('🔄 Monitor: Attempting session recovery...');
-        try {
-          await client.destroy();
-        } catch (e) {
-          console.log('⚠️ Monitor: Error destroying client:', e.message);
+        // Clear the monitor to prevent multiple recovery attempts
+        if (sessionMonitorInterval) {
+          clearInterval(sessionMonitorInterval);
+          sessionMonitorInterval = null;
         }
         
-        setTimeout(() => {
-          initializeWhatsApp();
+        // Attempt graceful recovery
+        console.log('🔄 Monitor: Attempting graceful session recovery...');
+        try {
+          // Try to destroy the client gracefully
+          if (client) {
+            await client.destroy();
+            client = null;
+          }
+        } catch (e) {
+          console.log('⚠️ Monitor: Error during graceful destroy:', e.message);
+          client = null;
+        }
+        
+        // Wait a moment then reinitialize
+        setTimeout(async () => {
+          if (!isShuttingDown) {
+            console.log('🔄 Monitor: Reinitializing WhatsApp client...');
+            await initializeWhatsApp();
+          }
         }, 3000);
       } else {
         console.log('✅ Monitor: Session healthy');
       }
     } catch (error) {
       console.log('❌ Monitor error:', error.message);
+      // If monitor itself fails, restart monitoring after a delay
+      if (sessionMonitorInterval) {
+        clearInterval(sessionMonitorInterval);
+        sessionMonitorInterval = null;
+      }
+      
+      setTimeout(() => {
+        if (!isShuttingDown && isClientReady) {
+          console.log('🔄 Restarting session monitor after error...');
+          startSessionMonitor();
+        }
+      }, 10000);
     }
   }, 30000); // Check every 30 seconds
 };
@@ -380,9 +500,18 @@ const isSessionHealthy = async () => {
     }
 
     // Try to get client info as a health check
-    const clientInfo = await client.info;
-    console.log('✅ Session healthy, client info available');
-    return true;
+    try {
+      const clientInfo = await client.info;
+      if (!clientInfo) {
+        console.log('❌ Client info not available');
+        return false;
+      }
+      console.log('✅ Session healthy, client info available');
+      return true;
+    } catch (infoError) {
+      console.log('❌ Failed to get client info:', infoError.message);
+      return false;
+    }
   } catch (error) {
     console.log('❌ Session health check failed:', error.message);
     return false;
@@ -471,6 +600,40 @@ const processMessageTemplate = (template, contact) => {
   return processed; // Return the processed template
 };
 
+// Utility function to detect media type and suggest options
+const getMediaTypeInfo = (mimetype) => {
+  const mediaInfo = {
+    type: 'unknown',
+    canBeSticker: false,
+    canBeVoice: false,
+    canBeGif: false,
+    canBeDocument: true,
+    canBeViewOnce: false,
+    suggestedOptions: []
+  };
+
+  if (mimetype.startsWith('image/')) {
+    mediaInfo.type = 'image';
+    mediaInfo.canBeSticker = true;
+    mediaInfo.canBeViewOnce = true;
+    mediaInfo.suggestedOptions = ['sendAsDocument', 'sendAsSticker', 'isViewOnce'];
+  } else if (mimetype.startsWith('video/')) {
+    mediaInfo.type = 'video';
+    mediaInfo.canBeGif = true;
+    mediaInfo.canBeViewOnce = true;
+    mediaInfo.suggestedOptions = ['sendAsDocument', 'sendAsGif', 'isViewOnce'];
+  } else if (mimetype.startsWith('audio/')) {
+    mediaInfo.type = 'audio';
+    mediaInfo.canBeVoice = true;
+    mediaInfo.suggestedOptions = ['sendAsDocument', 'sendAsVoice'];
+  } else {
+    mediaInfo.type = 'document';
+    mediaInfo.suggestedOptions = ['sendAsDocument'];
+  }
+
+  return mediaInfo;
+};
+
 // API Routes
 
 // Health check endpoint
@@ -484,12 +647,117 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Get media information and supported options
+app.get('/api/whatsapp/media-info', (req, res) => {
+  const supportedFormats = {
+    images: ['image/jpeg', 'image/png', 'image/gif', 'image/webp'],
+    videos: ['video/mp4', 'video/avi', 'video/mov', 'video/wmv'],
+    audio: ['audio/mp3', 'audio/wav', 'audio/ogg'],
+    documents: [
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    ]
+  };
+
+  const mediaOptions = {
+    sendAsDocument: {
+      description: 'Send any media as a document/file attachment',
+      supportedTypes: 'all'
+    },
+    sendAsSticker: {
+      description: 'Convert image/video to WebP sticker format',
+      supportedTypes: ['image/*', 'video/*'],
+      metadata: ['stickerName', 'stickerAuthor', 'stickerCategories']
+    },
+    sendAsVoice: {
+      description: 'Send audio as voice message with waveform',
+      supportedTypes: ['audio/*']
+    },
+    sendAsGif: {
+      description: 'Send video as animated GIF',
+      supportedTypes: ['video/*']
+    },
+    isViewOnce: {
+      description: 'Send image/video as view-once message (disappears after viewing)',
+      supportedTypes: ['image/*', 'video/*']
+    },
+    sendMediaAsHd: {
+      description: 'Send image in HD quality',
+      supportedTypes: ['image/*']
+    }
+  };
+
+  const limits = {
+    maxFileSize: '100MB',
+    maxFilesPerRequest: 10,
+    supportedEndpoints: [
+      '/api/whatsapp/send-single-media',
+      '/api/whatsapp/send-bulk-multimedia',
+      '/api/whatsapp/send-sticker',
+      '/api/whatsapp/send-media-url'
+    ]
+  };
+
+  res.json({
+    success: true,
+    supportedFormats,
+    mediaOptions,
+    limits,
+    examples: {
+      singleMedia: {
+        url: '/api/whatsapp/send-single-media',
+        method: 'POST',
+        contentType: 'multipart/form-data',
+        fields: {
+          contact: '{"mobile": "+919876543210", "name": "John Doe"}',
+          message: 'Hello {{name}}! Check this out.',
+          media: '[FILE]',
+          sendAsDocument: 'false',
+          sendAsSticker: 'false',
+          sendAsVoice: 'false',
+          sendAsGif: 'false',
+          isViewOnce: 'false'
+        }
+      },
+      sticker: {
+        url: '/api/whatsapp/send-sticker',
+        method: 'POST',
+        contentType: 'multipart/form-data',
+        fields: {
+          contact: '{"mobile": "+919876543210", "name": "John Doe"}',
+          media: '[IMAGE_OR_VIDEO_FILE]',
+          stickerName: 'My Custom Sticker',
+          stickerAuthor: 'Bot Creator',
+          stickerCategories: '😀,🎉,👍'
+        }
+      },
+      mediaFromUrl: {
+        url: '/api/whatsapp/send-media-url',
+        method: 'POST',
+        contentType: 'application/json',
+        body: {
+          contact: { mobile: '+919876543210', name: 'John Doe' },
+          mediaUrl: 'https://example.com/image.jpg',
+          message: 'Check this image!',
+          filename: 'custom-name.jpg',
+          sendAsDocument: false
+        }
+      }
+    },
+    timestamp: new Date().toISOString()
+  });
+});
+
 // Get WhatsApp connection status
-app.get('/api/whatsapp/status', (req, res) => {
+app.get('/api/whatsapp/status', async (req, res) => {
   console.log('📊 Status check requested from:', req.ip);
   
   let status = 'disconnected';
   let qrInfo = null;
+  let sessionInfo = null;
   
   // Check QR code validity first
   if (isQRCodeValid()) {
@@ -503,6 +771,27 @@ app.get('/api/whatsapp/status', (req, res) => {
     console.log('📱 Status: QR code is ready for scanning, expires in:', Math.round(remainingTime / 1000), 'seconds');
   } else if (isClientReady) {
     status = 'ready';
+    
+    // Get session information
+    try {
+      if (client && client.info) {
+        const clientInfo = client.info;
+        sessionInfo = {
+          hasSession: true,
+          phone: clientInfo.wid?.user || 'Unknown',
+          platform: clientInfo.platform || 'Unknown',
+          connected: await client.getState() === 'CONNECTED',
+          pushname: clientInfo.pushname || 'Unknown'
+        };
+      }
+    } catch (error) {
+      console.warn('⚠️ Error getting session info:', error.message);
+      sessionInfo = {
+        hasSession: true,
+        error: 'Could not retrieve session details'
+      };
+    }
+    
     console.log('✅ Status: WhatsApp client is ready');
   } else if (client && client.pupPage) {
     status = 'connecting';
@@ -514,15 +803,29 @@ app.get('/api/whatsapp/status', (req, res) => {
   console.log('📤 Sending status response:', status);
   res.json({
     status,
-    qrCode: qrInfo, // Include QR info instead of raw data
+    qrCode: qrInfo,
+    session: sessionInfo,
+    reconnectAttempts: reconnectAttempts,
+    maxReconnectAttempts: MAX_RECONNECT_ATTEMPTS,
+    isShuttingDown: isShuttingDown,
+    monitorActive: !!sessionMonitorInterval,
     timestamp: new Date().toISOString()
   });
 });
 
 // Initialize WhatsApp connection
-app.post('/api/whatsapp/initialize', (req, res) => {
+app.post('/api/whatsapp/initialize', async (req, res) => {
   try {
-    initializeWhatsApp();
+    // Don't allow multiple concurrent initializations
+    if (client && client.pupPage) {
+      return res.json({
+        success: true,
+        message: 'WhatsApp client is already initializing or ready',
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    await initializeWhatsApp();
     res.json({
       success: true,
       message: 'WhatsApp initialization started',
@@ -601,6 +904,311 @@ app.post('/api/whatsapp/send-single', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to send message: ' + error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Send single message with media
+app.post('/api/whatsapp/send-single-media', upload.single('media'), async (req, res) => {
+  try {
+    if (!isClientReady) {
+      return res.status(400).json({
+        success: false,
+        message: 'WhatsApp client is not ready. Please initialize connection first.'
+      });
+    }
+
+    const { contact, message, sendAsDocument, sendAsSticker, sendAsVoice, sendAsGif, isViewOnce } = req.body;
+    const mediaFile = req.file;
+    
+    if (!contact || !contact.mobile) {
+      return res.status(400).json({
+        success: false,
+        message: 'Contact mobile number is required'
+      });
+    }
+
+    if (!message && !mediaFile) {
+      return res.status(400).json({
+        success: false,
+        message: 'Either message text or media file is required'
+      });
+    }
+
+    const chatId = formatPhoneNumber(contact.mobile);
+    
+    if (!chatId) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid phone number format: ${contact.mobile}`
+      });
+    }
+
+    // Check if number exists on WhatsApp
+    const numberId = await client.getNumberId(chatId);
+    if (!numberId) {
+      return res.status(400).json({
+        success: false,
+        message: `Number ${contact.mobile} is not registered on WhatsApp`
+      });
+    }
+
+    // Check session health before sending
+    if (!(await waitForSession())) {
+      return res.status(500).json({
+        success: false,
+        message: 'WhatsApp session is not healthy. Please try again.'
+      });
+    }
+
+    let processedMessage = '';
+    if (message) {
+      processedMessage = processMessageTemplate(message, contact);
+    }
+
+    // Send text message if provided
+    if (processedMessage) {
+      await client.sendMessage(chatId, processedMessage);
+    }
+
+    // Send media if provided
+    if (mediaFile) {
+      const mediaPath = mediaFile.path || path.join(uploadDir, mediaFile.filename);
+      const media = MessageMedia.fromFilePath(mediaPath);
+      
+      if (mediaFile.originalname) {
+        media.filename = mediaFile.originalname;
+      }
+
+      // Configure send options based on request
+      const sendOptions = {
+        sendMediaAsDocument: sendAsDocument === 'true',
+        sendMediaAsSticker: sendAsSticker === 'true',
+        sendAudioAsVoice: sendAsVoice === 'true',
+        sendVideoAsGif: sendAsGif === 'true',
+        isViewOnce: isViewOnce === 'true',
+        caption: processedMessage || undefined
+      };
+
+      await client.sendMessage(chatId, media, sendOptions);
+
+      // Clean up uploaded file
+      if (fs.existsSync(mediaPath)) {
+        fs.unlinkSync(mediaPath);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Message sent successfully',
+      contact: contact.name || 'Unknown',
+      mobile: contact.mobile,
+      hasMeida: !!mediaFile,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('Error sending media message:', error);
+    
+    // Clean up uploaded file on error
+    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    
+    res.status(500).json({
+      success: false,
+      message: 'Failed to send message: ' + error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Send sticker from image/video
+app.post('/api/whatsapp/send-sticker', upload.single('media'), async (req, res) => {
+  try {
+    if (!isClientReady) {
+      return res.status(400).json({
+        success: false,
+        message: 'WhatsApp client is not ready. Please initialize connection first.'
+      });
+    }
+
+    const { contact, stickerName, stickerAuthor, stickerCategories } = req.body;
+    const mediaFile = req.file;
+    
+    if (!contact || !contact.mobile) {
+      return res.status(400).json({
+        success: false,
+        message: 'Contact mobile number is required'
+      });
+    }
+
+    if (!mediaFile) {
+      return res.status(400).json({
+        success: false,
+        message: 'Media file is required for sticker'
+      });
+    }
+
+    const chatId = formatPhoneNumber(contact.mobile);
+    
+    if (!chatId) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid phone number format: ${contact.mobile}`
+      });
+    }
+
+    // Check if number exists on WhatsApp
+    const numberId = await client.getNumberId(chatId);
+    if (!numberId) {
+      return res.status(400).json({
+        success: false,
+        message: `Number ${contact.mobile} is not registered on WhatsApp`
+      });
+    }
+
+    // Check session health before sending
+    if (!(await waitForSession())) {
+      return res.status(500).json({
+        success: false,
+        message: 'WhatsApp session is not healthy. Please try again.'
+      });
+    }
+
+    const mediaPath = mediaFile.path || path.join(uploadDir, mediaFile.filename);
+    const media = MessageMedia.fromFilePath(mediaPath);
+
+    // Send as sticker with metadata
+    const sendOptions = {
+      sendMediaAsSticker: true,
+      stickerName: stickerName || 'Custom Sticker',
+      stickerAuthor: stickerAuthor || 'WhatsApp Bot',
+      stickerCategories: stickerCategories ? stickerCategories.split(',') : ['😀']
+    };
+
+    await client.sendMessage(chatId, media, sendOptions);
+
+    // Clean up uploaded file
+    if (fs.existsSync(mediaPath)) {
+      fs.unlinkSync(mediaPath);
+    }
+
+    res.json({
+      success: true,
+      message: 'Sticker sent successfully',
+      contact: contact.name || 'Unknown',
+      mobile: contact.mobile,
+      stickerName: sendOptions.stickerName,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('Error sending sticker:', error);
+    
+    // Clean up uploaded file on error
+    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    
+    res.status(500).json({
+      success: false,
+      message: 'Failed to send sticker: ' + error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Send media from URL
+app.post('/api/whatsapp/send-media-url', async (req, res) => {
+  try {
+    if (!isClientReady) {
+      return res.status(400).json({
+        success: false,
+        message: 'WhatsApp client is not ready. Please initialize connection first.'
+      });
+    }
+
+    const { contact, mediaUrl, message, sendAsDocument, sendAsSticker, sendAsVoice, sendAsGif, isViewOnce, filename } = req.body;
+    
+    if (!contact || !contact.mobile) {
+      return res.status(400).json({
+        success: false,
+        message: 'Contact mobile number is required'
+      });
+    }
+
+    if (!mediaUrl) {
+      return res.status(400).json({
+        success: false,
+        message: 'Media URL is required'
+      });
+    }
+
+    const chatId = formatPhoneNumber(contact.mobile);
+    
+    if (!chatId) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid phone number format: ${contact.mobile}`
+      });
+    }
+
+    // Check if number exists on WhatsApp
+    const numberId = await client.getNumberId(chatId);
+    if (!numberId) {
+      return res.status(400).json({
+        success: false,
+        message: `Number ${contact.mobile} is not registered on WhatsApp`
+      });
+    }
+
+    // Check session health before sending
+    if (!(await waitForSession())) {
+      return res.status(500).json({
+        success: false,
+        message: 'WhatsApp session is not healthy. Please try again.'
+      });
+    }
+
+    let processedMessage = '';
+    if (message) {
+      processedMessage = processMessageTemplate(message, contact);
+    }
+
+    // Create media from URL
+    const media = await MessageMedia.fromUrl(mediaUrl, {
+      filename: filename || undefined,
+      unsafeMime: true // Allow unknown MIME types
+    });
+
+    // Configure send options
+    const sendOptions = {
+      sendMediaAsDocument: sendAsDocument === 'true',
+      sendMediaAsSticker: sendAsSticker === 'true',
+      sendAudioAsVoice: sendAsVoice === 'true',
+      sendVideoAsGif: sendAsGif === 'true',
+      isViewOnce: isViewOnce === 'true',
+      caption: processedMessage || undefined
+    };
+
+    await client.sendMessage(chatId, media, sendOptions);
+
+    res.json({
+      success: true,
+      message: 'Media sent successfully from URL',
+      contact: contact.name || 'Unknown',
+      mobile: contact.mobile,
+      mediaUrl: mediaUrl,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('Error sending media from URL:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to send media: ' + error.message,
       timestamp: new Date().toISOString()
     });
   }
@@ -821,7 +1429,11 @@ app.post('/api/whatsapp/send-bulk-multimedia', upload.any(), async (req, res) =>
       console.log('⚠️ Client not ready at start of multimedia send. Attempting recovery...');
       if (!(await waitForSession(5, 2000))) {
         console.log('🔄 Session still not ready. Reinitializing WhatsApp client...');
-        try { initializeWhatsApp(); } catch (e) { console.warn('⚠️ Error calling initializeWhatsApp:', e.message); }
+        try { 
+          await initializeWhatsApp(); 
+        } catch (e) { 
+          console.warn('⚠️ Error calling initializeWhatsApp:', e.message); 
+        }
         await new Promise(resolve => setTimeout(resolve, 5000));
         if (!(await waitForSession(5, 2000))) {
           return res.status(400).json({
@@ -833,7 +1445,23 @@ app.post('/api/whatsapp/send-bulk-multimedia', upload.any(), async (req, res) =>
     }
 
     // Parse the data from FormData
-    const data = JSON.parse(req.body.data);
+    if (!req.body || !req.body.data) {
+      return res.status(400).json({
+        success: false,
+        message: 'Request data is missing'
+      });
+    }
+
+    let data;
+    try {
+      data = JSON.parse(req.body.data);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid JSON data provided'
+      });
+    }
+
     const { contacts, template, url } = data;
     const attachments = req.files || [];
     
@@ -1093,24 +1721,116 @@ app.get('/api/whatsapp/qr', (req, res) => {
 app.post('/api/whatsapp/disconnect', async (req, res) => {
   console.log('🔌 Disconnect requested from:', req.ip);
   try {
+    isClientReady = false;
+    
+    // Clear session monitor first
+    if (sessionMonitorInterval) {
+      clearInterval(sessionMonitorInterval);
+      sessionMonitorInterval = null;
+      console.log('🛑 Session monitor stopped');
+    }
+    
     if (client) {
-      console.log('🧹 Destroying WhatsApp client...');
-      await client.destroy();
+      console.log('🧹 Destroying WhatsApp client and clearing session...');
+      
+      try {
+        // First try to logout properly (this clears session data)
+        await client.logout();
+        console.log('✅ Logged out successfully');
+      } catch (logoutError) {
+        console.warn('⚠️ Error during logout:', logoutError.message);
+        
+        // If logout fails, try to destroy the client
+        try {
+          await client.destroy();
+          console.log('✅ Client destroyed');
+        } catch (destroyError) {
+          console.warn('⚠️ Error destroying client:', destroyError.message);
+        }
+      }
+      
+      // Clear session data manually if needed
+      try {
+        if (client.authStrategy && typeof client.authStrategy.logout === 'function') {
+          await client.authStrategy.logout();
+          console.log('✅ Session data cleared');
+        }
+      } catch (sessionError) {
+        console.warn('⚠️ Error clearing session data:', sessionError.message);
+      }
+      
       client = null;
     }
-    isClientReady = false;
+    
+    // Clear all state variables
     qrCodeData = null;
-    qrCodeTimestamp = null; // Clear QR data on manual disconnect
+    qrCodeTimestamp = null;
+    reconnectAttempts = 0;
 
     res.json({
       success: true,
-      message: 'WhatsApp disconnected successfully',
+      message: 'WhatsApp disconnected and session cleared successfully',
       timestamp: new Date().toISOString()
     });
   } catch (error) {
+    console.error('❌ Error during disconnect:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to disconnect WhatsApp: ' + error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Clear session data and restart fresh
+app.post('/api/whatsapp/clear-session', async (req, res) => {
+  console.log('🧹 Clear session requested from:', req.ip);
+  try {
+    isClientReady = false;
+    
+    // Stop monitoring
+    if (sessionMonitorInterval) {
+      clearInterval(sessionMonitorInterval);
+      sessionMonitorInterval = null;
+    }
+    
+    if (client) {
+      console.log('🛑 Stopping client and clearing all session data...');
+      
+      try {
+        // Logout to clear session properly
+        await client.logout();
+      } catch (error) {
+        console.warn('⚠️ Logout error (continuing):', error.message);
+      }
+      
+      try {
+        // Destroy client
+        await client.destroy();
+      } catch (error) {
+        console.warn('⚠️ Destroy error (continuing):', error.message);
+      }
+      
+      client = null;
+    }
+    
+    // Clear all state
+    qrCodeData = null;
+    qrCodeTimestamp = null;
+    reconnectAttempts = 0;
+    
+    console.log('✅ Session cleared. Ready for fresh initialization.');
+    
+    res.json({
+      success: true,
+      message: 'Session cleared successfully. You can now initialize a fresh connection.',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('❌ Error clearing session:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to clear session: ' + error.message,
       timestamp: new Date().toISOString()
     });
   }
@@ -1167,9 +1887,13 @@ app.listen(PORT, () => {
   // Auto-initialize WhatsApp on server start
   console.log('🔄 Auto-initializing WhatsApp connection...');
   console.log('⏰ Starting initialization in 2 seconds...');
-  setTimeout(() => {
+  setTimeout(async () => {
     console.log('🎯 Initializing WhatsApp now...');
-    initializeWhatsApp();
+    try {
+      await initializeWhatsApp();
+    } catch (error) {
+      console.error('❌ Error during auto-initialization:', error.message);
+    }
   }, 2000);
 });
 
@@ -1187,29 +1911,41 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 // Graceful shutdown
-process.on('SIGINT', async () => {
-  console.log('\n🛑 Shutting down server gracefully...');
-  console.log('📱 Disconnecting WhatsApp client...');
-  if (client) {
-    console.log('📱 Disconnecting WhatsApp...');
-    try {
-      await client.destroy();
-    } catch (error) {
-      console.error('Error destroying client:', error);
-    }
+const gracefulShutdown = async (signal) => {
+  console.log(`\n🛑 Received ${signal} - Shutting down server gracefully...`);
+  isShuttingDown = true;
+  
+  // Stop session monitoring
+  if (sessionMonitorInterval) {
+    clearInterval(sessionMonitorInterval);
+    sessionMonitorInterval = null;
+    console.log('� Session monitor stopped');
   }
+  
+  // Disconnect WhatsApp properly
+  if (client) {
+    console.log('📱 Properly disconnecting WhatsApp...');
+    try {
+      // First try logout to clear session data
+      await client.logout();
+      console.log('✅ WhatsApp logged out successfully');
+    } catch (logoutError) {
+      console.warn('⚠️ Error during logout:', logoutError.message);
+      
+      // If logout fails, try destroy
+      try {
+        await client.destroy();
+        console.log('✅ WhatsApp client destroyed');
+      } catch (destroyError) {
+        console.error('❌ Error destroying client:', destroyError.message);
+      }
+    }
+    client = null;
+  }
+  
+  console.log('✅ Graceful shutdown completed');
   process.exit(0);
-});
+};
 
-process.on('SIGTERM', async () => {
-  console.log('\n🛑 Shutting down server...');
-  if (client) {
-    console.log('📱 Disconnecting WhatsApp...');
-    try {
-      await client.destroy();
-    } catch (error) {
-      console.error('Error destroying client:', error);
-    }
-  }
-  process.exit(0);
-});
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));

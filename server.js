@@ -635,7 +635,7 @@ const getMediaTypeInfo = (mimetype) => {
 };
 
 // Utility function to safely send media with canvas error handling
-const safeSendMedia = async (chatId, media, options = {}) => {
+const safeSendMedia = async (chatId, media, options = {}, originalFilePath = null) => {
   try {
     console.log('📤 Attempting to send media with options:', Object.keys(options));
     await client.sendMessage(chatId, media, options);
@@ -646,16 +646,71 @@ const safeSendMedia = async (chatId, media, options = {}) => {
     // Handle canvas security errors specifically
     if (error.message.includes('Tainted canvases') || 
         error.message.includes('SecurityError') || 
-        error.message.includes('toDataURL')) {
-      console.warn('🔒 Canvas security issue detected - sending as document instead');
+        error.message.includes('toDataURL') ||
+        error.message.includes('toBlob')) {
       
-      // Force document mode to bypass canvas security restrictions
+      console.warn('🔒 Canvas security issue detected');
+      
+      // For images, try different approaches before falling back to document
+      if (media.mimetype && media.mimetype.startsWith('image/')) {
+        console.log('🖼️ Trying alternative image sending methods...');
+        
+        // Method 1: Try sending without any special options (basic image)
+        try {
+          console.log('📸 Method 1: Basic image send (clean options)');
+          await client.sendMessage(chatId, media, {});
+          console.log('✅ Image sent successfully with basic method');
+          return;
+        } catch (basicError) {
+          console.warn('⚠️ Basic image send failed:', basicError.message);
+        }
+        
+        // Method 2: Try creating fresh media object (if we have the file path)
+        if (originalFilePath) {
+          try {
+            console.log('📸 Method 2: Fresh media object from file');
+            const freshMedia = createSafeMedia(originalFilePath, media.filename);
+            await client.sendMessage(chatId, freshMedia, {});
+            console.log('✅ Image sent successfully with fresh media object');
+            return;
+          } catch (freshError) {
+            console.warn('⚠️ Fresh media send failed:', freshError.message);
+          }
+        }
+        
+        // Method 3: Try with explicit image options
+        try {
+          console.log('📸 Method 3: Explicit image options (force preview)');
+          await client.sendMessage(chatId, media, { 
+            sendMediaAsDocument: false,
+            sendMediaAsSticker: false,
+            sendVideoAsGif: false
+          });
+          console.log('✅ Image sent successfully with explicit options');
+          return;
+        } catch (explicitError) {
+          console.warn('⚠️ Explicit options send failed:', explicitError.message);
+        }
+        
+        // Method 4: Try minimal media object
+        try {
+          console.log('📸 Method 4: Minimal media object');
+          const minimalMedia = new MessageMedia(media.mimetype, media.data, media.filename);
+          await client.sendMessage(chatId, minimalMedia, {});
+          console.log('✅ Image sent successfully with minimal media object');
+          return;
+        } catch (minimalError) {
+          console.warn('⚠️ Minimal media send failed:', minimalError.message);
+        }
+      }
+      
+      // Final fallback: Send as document (but log it clearly)
+      console.warn('📄 All image preview methods failed - sending as document (last resort)');
       const documentOptions = {
         ...options,
         sendMediaAsDocument: true,
-        sendMediaAsSticker: false, // Disable sticker mode if it was enabled
-        sendAudioAsVoice: options.sendAudioAsVoice || false, // Keep voice if it was audio
-        sendVideoAsGif: false // Disable GIF mode if it was enabled
+        sendMediaAsSticker: false,
+        sendVideoAsGif: false
       };
       
       await client.sendMessage(chatId, media, documentOptions);
@@ -664,6 +719,30 @@ const safeSendMedia = async (chatId, media, options = {}) => {
       // Re-throw other errors
       throw error;
     }
+  }
+};
+
+// Enhanced media creation to avoid canvas issues
+const createSafeMedia = (filePath, filename = null) => {
+  try {
+    console.log('🔧 Creating safe media object from:', filePath);
+    const media = MessageMedia.fromFilePath(filePath);
+    
+    if (filename) {
+      media.filename = filename;
+    }
+    
+    // Clear any problematic metadata that might cause canvas issues
+    if (media.data) {
+      // Ensure clean base64 data
+      media.data = media.data.replace(/^data:[^;]+;base64,/, '');
+    }
+    
+    console.log('✅ Safe media object created');
+    return media;
+  } catch (error) {
+    console.error('❌ Error creating safe media:', error.message);
+    throw error;
   }
 };
 
@@ -1008,11 +1087,7 @@ app.post('/api/whatsapp/send-single-media', upload.single('media'), async (req, 
     // Send media if provided
     if (mediaFile) {
       const mediaPath = mediaFile.path || path.join(uploadDir, mediaFile.filename);
-      const media = MessageMedia.fromFilePath(mediaPath);
-      
-      if (mediaFile.originalname) {
-        media.filename = mediaFile.originalname;
-      }
+      const media = createSafeMedia(mediaPath, mediaFile.originalname);
 
       // Configure send options based on request
       const sendOptions = {
@@ -1025,7 +1100,7 @@ app.post('/api/whatsapp/send-single-media', upload.single('media'), async (req, 
       };
 
       try {
-        await safeSendMedia(chatId, media, sendOptions);
+        await safeSendMedia(chatId, media, sendOptions, mediaPath);
       } catch (mediaError) {
         // If safeSendMedia still fails, it's a different issue
         console.error('❌ Failed to send media even with safe function:', mediaError.message);
@@ -1233,7 +1308,7 @@ app.post('/api/whatsapp/send-media-url', async (req, res) => {
     };
 
     try {
-      await safeSendMedia(chatId, media, sendOptions);
+      await safeSendMedia(chatId, media, sendOptions, null); // URL media doesn't have local file path
     } catch (mediaError) {
       // If safeSendMedia still fails, it's a different issue
       console.error('❌ Failed to send media from URL even with safe function:', mediaError.message);
@@ -1637,10 +1712,7 @@ app.post('/api/whatsapp/send-bulk-multimedia', upload.any(), async (req, res) =>
             throw new Error('Attachment file not found on server');
           }
 
-          const media = MessageMedia.fromFilePath(resolvedFilePath);
-          if (attachment.originalname) {
-            media.filename = attachment.originalname; // keep original name for recipient
-          }
+          const media = createSafeMedia(resolvedFilePath, attachment.originalname);
 
           console.log('📎 Sending attachment', {
             resolvedFilePath,
@@ -1655,17 +1727,17 @@ app.post('/api/whatsapp/send-bulk-multimedia', upload.any(), async (req, res) =>
               console.log('📸 Sending as preview-enabled media (image/video)');
               
               // Use safe send function to handle canvas issues
-              await safeSendMedia(chatId, media);
+              await safeSendMedia(chatId, media, {}, resolvedFilePath);
             } else if (attachment.mimetype && attachment.mimetype.startsWith('audio/')) {
               console.log('🎵 Sending audio as voice message');
-              await safeSendMedia(chatId, media, { sendAudioAsVoice: true });
+              await safeSendMedia(chatId, media, { sendAudioAsVoice: true }, resolvedFilePath);
             } else {
               console.log('📄 Sending as document');
-              await safeSendMedia(chatId, media, { sendMediaAsDocument: true });
+              await safeSendMedia(chatId, media, { sendMediaAsDocument: true }, resolvedFilePath);
             }
           } catch (e) {
             console.warn('⚠️ Sending as preferred format failed, retrying as document:', e.message);
-            await safeSendMedia(chatId, media, { sendMediaAsDocument: true });
+            await safeSendMedia(chatId, media, { sendMediaAsDocument: true }, resolvedFilePath);
           }
 
           console.log(`✅ Attachment ${j + 1} sent to ${contact.name}: ${attachment.originalname || attachment.filename}`);

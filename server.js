@@ -765,9 +765,121 @@ const safeSendMedia = async (chatId, media, options = {}, originalFilePath = nul
           };
           
           console.log('📤 Sending with enhanced options:', Object.keys(enhancedOptions));
-          await client.sendMessage(chatId, processedMediaObj, enhancedOptions);
-          console.log('✅ Method 1 succeeded - Canvas-free WhatsApp processing worked');
-          return;
+          
+          // Try to send using WhatsApp's low-level message functions to bypass canvas
+          try {
+            console.log('🎯 Attempting low-level WhatsApp message send');
+            const success = await client.pupPage.evaluate(async (chatId, mediaData, options) => {
+              try {
+                console.log('🔧 Using WhatsApp Store functions directly');
+                
+                // Get the chat object
+                const chat = window.Store.Chat.get(chatId);
+                if (!chat) {
+                  throw new Error('Chat not found');
+                }
+                
+                // Convert base64 to blob
+                const binaryString = atob(mediaData.data);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                  bytes[i] = binaryString.charCodeAt(i);
+                }
+                const blob = new Blob([bytes], { type: mediaData.mimetype });
+                
+                // Create file object
+                const file = new File([blob], mediaData.filename, { type: mediaData.mimetype });
+                
+                console.log('🔧 Created file object:', { name: file.name, type: file.type, size: file.size });
+                
+                // Try to use WhatsApp's direct message sending with media
+                if (window.Store.addAndSendMsgToChat) {
+                  console.log('🎯 Using addAndSendMsgToChat');
+                  
+                  const mediaCollection = new window.Store.MediaCollection();
+                  mediaCollection.add({
+                    file: file,
+                    type: 'image'
+                  });
+                  
+                  const result = await window.Store.addAndSendMsgToChat(chat, '', {
+                    attachment: mediaCollection.models[0]
+                  });
+                  
+                  console.log('✅ Direct message send successful');
+                  return { success: true, method: 'addAndSendMsgToChat' };
+                }
+                
+                // Alternative: Use WWebJS sendMessage if available
+                if (window.WWebJS && window.WWebJS.sendMessage) {
+                  console.log('🎯 Using WWebJS.sendMessage');
+                  
+                  const result = await window.WWebJS.sendMessage(chat, '', {
+                    quotedMsg: options.quotedMessageId,
+                    media: {
+                      mimetype: mediaData.mimetype,
+                      data: mediaData.data,
+                      filename: mediaData.filename
+                    }
+                  });
+                  
+                  console.log('✅ WWebJS direct send successful');
+                  return { success: true, method: 'WWebJS.sendMessage' };
+                }
+                
+                // Final attempt: Use Store.Msg.add directly
+                if (window.Store.Msg) {
+                  console.log('🎯 Using Store.Msg.add directly');
+                  
+                  // Create message object
+                  const msgId = window.Store.MsgKey.newId();
+                  const message = {
+                    id: msgId,
+                    body: '',
+                    type: 'image',
+                    from: window.Store.Me.wid,
+                    to: chat.id,
+                    self: 'out',
+                    t: Math.floor(Date.now() / 1000),
+                    notifyName: window.Store.Me.name,
+                    media: {
+                      mimetype: mediaData.mimetype,
+                      data: mediaData.data,
+                      filename: mediaData.filename
+                    }
+                  };
+                  
+                  const msgModel = window.Store.Msg.add(message);
+                  await window.Store.Msg.sendMessage(msgModel);
+                  
+                  console.log('✅ Direct Store.Msg send successful');
+                  return { success: true, method: 'Store.Msg.add' };
+                }
+                
+                return { success: false, error: 'No suitable sending method found' };
+                
+              } catch (error) {
+                console.log('❌ Low-level send error:', error.message);
+                return { success: false, error: error.message };
+              }
+            }, chatId, processedMedia.data, enhancedOptions);
+            
+            if (success.success) {
+              console.log(`✅ Method 1 succeeded - Low-level WhatsApp send worked (${success.method})`);
+              return;
+            } else {
+              console.log('❌ Low-level send failed:', success.error);
+              throw new Error('Low-level send failed: ' + success.error);
+            }
+            
+          } catch (lowLevelError) {
+            console.log('❌ Low-level approach failed, trying standard approach:', lowLevelError.message);
+            
+            // Fallback to standard send
+            await client.sendMessage(chatId, processedMediaObj, enhancedOptions);
+            console.log('✅ Method 1 succeeded - Canvas-free WhatsApp processing worked (standard fallback)');
+            return;
+          }
         } else {
           console.log('❌ Method 1 failed - WhatsApp internal processing unsuccessful');
           console.log('❌ Failure reason:', processedMedia.error);

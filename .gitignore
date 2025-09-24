@@ -11,7 +11,7 @@ pids
 *.pid
 *.seed
 *.pid.lock
-
+whatsapp-auth
 # Coverage directory used by tools like istanbul
 coverage
 *.lcov

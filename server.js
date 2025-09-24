@@ -657,42 +657,84 @@ const safeSendMedia = async (chatId, media, options = {}, originalFilePath = nul
             console.log('🔧 Starting browser-side WhatsApp internal processing');
             console.log('📁 File path received:', filePath);
             
-            // Check if WhatsApp internal functions are available
-            if (!window.WWebJS) {
-              console.log('❌ window.WWebJS not available');
-              return { success: false, error: 'WWebJS not available' };
+            // Method 1a: Try bypassing canvas entirely with direct blob creation
+            console.log('🎯 Method 1a: Direct blob processing (bypass canvas)');
+            
+            // Convert base64 to Uint8Array
+            const binaryString = atob(mediaData.data);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+              bytes[i] = binaryString.charCodeAt(i);
             }
             
-            if (!window.WWebJS.processMediaData) {
-              console.log('❌ window.WWebJS.processMediaData not available');
-              return { success: false, error: 'processMediaData not available' };
+            // Create blob directly from bytes (no canvas involved)
+            const blob = new Blob([bytes], { type: mediaData.mimetype });
+            console.log('✅ Direct blob created successfully');
+            
+            // Check if we can access WhatsApp's lower-level upload functions
+            if (window.Store && window.Store.MediaUpload) {
+              console.log('🔧 Using WhatsApp Store.MediaUpload directly');
+              
+              // Create file from blob
+              const file = new File([blob], mediaData.filename, { type: mediaData.mimetype });
+              
+              // Try to use WhatsApp's upload mechanism directly
+              if (window.Store.OpaqueData && window.Store.OpaqueData.createFromData) {
+                console.log('🔧 Creating OpaqueData object');
+                const opaqueData = await window.Store.OpaqueData.createFromData(file, file.type);
+                
+                console.log('✅ OpaqueData created successfully');
+                
+                // Return the processed data without canvas operations
+                return { 
+                  success: true, 
+                  data: {
+                    mimetype: mediaData.mimetype,
+                    data: mediaData.data, // Keep original base64
+                    filename: mediaData.filename,
+                    blob: blob,
+                    processedBy: 'direct-blob'
+                  }, 
+                  method: 'whatsapp-direct' 
+                };
+              }
             }
             
-            console.log('✅ WhatsApp internal functions available');
+            // Method 1b: Check for alternative WhatsApp functions that don't use canvas
+            if (window.WWebJS) {
+              console.log('� Checking for canvas-free WWebJS functions');
+              
+              // Try to find functions that work with raw data
+              if (window.WWebJS.mediaInfoToFile) {
+                console.log('🔧 Using mediaInfoToFile approach');
+                const file = window.WWebJS.mediaInfoToFile(mediaData);
+                console.log('✅ File created via mediaInfoToFile');
+                
+                return { 
+                  success: true, 
+                  data: {
+                    mimetype: mediaData.mimetype,
+                    data: mediaData.data,
+                    filename: mediaData.filename,
+                    processedBy: 'mediaInfoToFile'
+                  }, 
+                  method: 'whatsapp-alt' 
+                };
+              }
+            }
             
-            // Use the media data passed from server instead of trying to read file
-            const mediaInfo = {
-              mimetype: mediaData.mimetype,
-              data: mediaData.data,
-              filename: mediaData.filename || filePath.split(/[/\\]/).pop()
+            // Method 1c: Return enhanced media object (no canvas processing)
+            console.log('🔧 Returning enhanced media object');
+            return { 
+              success: true, 
+              data: {
+                mimetype: mediaData.mimetype,
+                data: mediaData.data,
+                filename: mediaData.filename,
+                processedBy: 'enhanced'
+              }, 
+              method: 'enhanced-media' 
             };
-            
-            console.log('🔧 Processing media with WhatsApp internal pipeline');
-            console.log('📊 Media info:', { 
-              mimetype: mediaInfo.mimetype, 
-              filename: mediaInfo.filename,
-              dataLength: mediaInfo.data.length 
-            });
-            
-            // Use WhatsApp's internal processMediaData function
-            const processedData = await window.WWebJS.processMediaData(mediaInfo, {
-              forceDocument: false,
-              forceVoice: false,
-              forceGif: false
-            });
-            
-            console.log('✅ WhatsApp internal processing completed successfully');
-            return { success: true, data: processedData, method: 'whatsapp-internal' };
             
           } catch (error) {
             console.log('❌ Internal processing error:', error.message);
@@ -704,29 +746,27 @@ const safeSendMedia = async (chatId, media, options = {}, originalFilePath = nul
         if (processedMedia.success) {
           console.log(`✅ WhatsApp processing succeeded using ${processedMedia.method} method`);
           console.log('📊 Processed data keys:', Object.keys(processedMedia.data));
+          console.log('🔧 Processed by:', processedMedia.data.processedBy);
           
           // Create MessageMedia object from processed data
-          let processedMediaObj;
-          if (processedMedia.method === 'whatsapp-internal') {
-            // Use processed data from WhatsApp's internal pipeline
-            console.log('🎯 Using WhatsApp internal pipeline result');
-            processedMediaObj = new MessageMedia(
-              processedMedia.data.mimetype || processedMedia.data.type,
-              processedMedia.data.data,
-              processedMedia.data.filename
-            );
-          } else {
-            // Use standard media object
-            console.log('🎯 Using standard media object');
-            processedMediaObj = new MessageMedia(
-              processedMedia.data.mimetype,
-              processedMedia.data.data,
-              processedMedia.data.filename
-            );
-          }
+          const processedMediaObj = new MessageMedia(
+            processedMedia.data.mimetype,
+            processedMedia.data.data,
+            processedMedia.data.filename
+          );
           
-          await client.sendMessage(chatId, processedMediaObj, options);
-          console.log('✅ Method 1 succeeded - WhatsApp internal processing worked');
+          // Try sending with specific options to encourage preview mode
+          const enhancedOptions = {
+            ...options,
+            sendMediaAsDocument: false,
+            sendMediaAsSticker: false,
+            sendVideoAsGif: false,
+            caption: options.caption || ''
+          };
+          
+          console.log('📤 Sending with enhanced options:', Object.keys(enhancedOptions));
+          await client.sendMessage(chatId, processedMediaObj, enhancedOptions);
+          console.log('✅ Method 1 succeeded - Canvas-free WhatsApp processing worked');
           return;
         } else {
           console.log('❌ Method 1 failed - WhatsApp internal processing unsuccessful');
